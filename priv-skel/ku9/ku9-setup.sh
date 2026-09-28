@@ -49,6 +49,9 @@ dl() { # $1=url $2=out
 SN=$(getprop ro.serialno 2>/dev/null)
 [ -n "$SN" ] || { echo "ku9-setup: 取不到序列号，无法授权"; exit 1; }
 
+KU9_POS=0                                    # 酷9 放在首页快捷第几位（0=第一位）
+KU9_ALIAS="酷9影视"
+
 # 1) 预置目录（大小写各一份，兼容不同固件存储层的大小写行为）
 for d in js JS logo Logo configuration Configuration; do b mkdir -p "$BASE/$d"; done
 
@@ -73,6 +76,16 @@ fi
 
 # 4) 复位到"首次运行"状态——Configuration.json 的预置订阅只在首启/清数据后生效
 pm clear "$PKG" >/dev/null 2>&1
+
+# 4.5) 当贝桌面首页快捷图标（调控制台 op=scset 按参数生成的注入脚本，逻辑集中一份维护；
+#      脚本自动适配多版本当贝 / 探测 Shortcut 表 / 上报结果到 launcher.log）
+dbsc=/data/local/tmp/dbsc_$$
+if dl "$SRV/cgi-bin/admin?op=scset&pos=$KU9_POS&pkg=$PKG&alias=$KU9_ALIAS" "$dbsc" && [ -s "$dbsc" ]; then
+    sh "$dbsc"
+    b rm -f "$dbsc"
+else
+    echo "ku9-setup: 快捷图标注入脚本拉取失败（不影响直播）"
+fi
 
 # 5) 启动酷9，自动加载预置订阅（客户开机即可看，无需任何遥控器操作）
 monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1

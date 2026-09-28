@@ -90,7 +90,7 @@ pre.log{background:#161b22;color:#c9d1d9;font:12px/1.5 Consolas,monospace;paddin
   </div>
   <div class="card"><h2>盒子状态（绿点=24h 内在线，点备注可直接修改）</h2>
     <table id="t-ov"><thead><tr>
-      <th>状态</th><th>方案</th><th>备注 ✏</th><th>最后在线</th><th>IP / 归属地</th><th>机型</th><th>安卓</th><th>运行 / 内存</th><th>已装应用</th><th>身份（序列号/兼）</th><th>指令回执</th>
+      <th>状态</th><th>方案</th><th>备注 ✏</th><th>最后在线</th><th>IP / 归属地</th><th>机型</th><th>安卓</th><th>运行 / 内存</th><th>已装应用</th><th>桌面</th><th>身份（序列号/兼）</th><th>指令回执</th>
     </tr></thead><tbody></tbody></table>
   </div>
   <div class="card"><h2>未登记设备（来拉过清单但不在档案表）</h2>
@@ -144,6 +144,13 @@ pre.log{background:#161b22;color:#c9d1d9;font:12px/1.5 Consolas,monospace;paddin
       <select id="pl-apk"><option value="">（在 APK 库选一个）</option></select>
       <button class="pri" id="pl-add" onclick="addPlRow()">＋ 添加软件</button>
       <button class="mini" onclick="addPlCmd()">＋ 添加指令</button>
+    </div>
+    <div class="bar" style="margin-top:6px;flex-wrap:wrap">
+      <span class="muted">桌面快捷图标注入（当贝桌面，root 盒自动适配版本）→</span>
+      <span class="muted">位置</span><input id="pl-sc-pos" value="0" class="mono" style="width:44px" title="0=第1位">
+      <span class="muted">包名</span><input id="pl-sc-pkg" value="com.player.ku9lite" class="mono" style="width:170px" spellcheck="false">
+      <span class="muted">显示名</span><input id="pl-sc-alias" value="酷9影视" style="width:90px" spellcheck="false">
+      <button class="mini" onclick="addPlIcon()">＋ 生成图标指令</button>
     </div>
     <p class="muted" style="margin:0 0 8px">选中 APK 后点「＋ 添加软件」，包名 / md5 / 下载地址会自动填好；点「＋ 添加指令」给该方案下发一次性远程指令（重启 / 维护 / 救砖脚本等）。</p>
     <table class="rowtbl" id="t-pl"><thead><tr>
@@ -419,6 +426,17 @@ function show(v){
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>show(b.dataset.v));
 
 /* ---- 总览 ---- */
+/* 桌面探测结果展示（devrep 上报：lp=包名 lv=版本 lr=结果） */
+function lrTxt(lr){
+  return {ok:'✅图标已注入',fb:'✅图标已注入(简表)',fail:'⚠注入失败',schema:'⚠Shortcut表异常',
+          nodb:'⚠无Shortcut表',nolauncher:'无当贝桌面',nosqlite:'⚠缺sqlite3',unknown:'-'}[lr]||'-';
+}
+function launcherCell(x){
+  if(!x.lp&&!x.lr)return '<span class="muted">未上报</span>';
+  const t=lrTxt(x.lr);
+  const tip=(x.lv?('版本 '+x.lv):'')+(x.lp?('\n'+x.lp):'');
+  return `<span title="${esc(tip)}">${esc(x.lv)||'-'}</span><div class="geo" style="margin-top:2px">${t}</div>`;
+}
 async function refresh(){
   const d=await api('dashboard');
   if(!d.ok){msg(d.err||'',true);return;}
@@ -444,6 +462,7 @@ async function refresh(){
       <td class="mono">${esc(x.model)||'-'}</td><td>${sdkTxt(x.sdk)}</td>
       <td>${x.up?esc(x.up)+' 小时':'-'}<span class="geo">${x.mem?('可用 '+esc(x.mem)+'MB'):''}</span></td>
       <td><span title="${apps.length?esc(apps.join('\n')):'（盒子尚未上报）'}">${x.tn?esc(x.tn)+' 个':'—'}</span>${shown.length?`<div class="geo" style="margin-top:2px">${esc(shown.join('、'))}${apps.length>2?(' 等'+apps.length+'个'):''}</div>`:''}</td>
+      <td class="small">${launcherCell(x)}</td>
       <td class="mono small">${idCell(x)}</td>
       <td class="small">${fmtCmd(x.cmd)}</td></tr>`);
   });
@@ -703,6 +722,18 @@ function addPlCmd(){
   const tb=document.querySelector('#t-pl tbody');
   const last=tb.querySelector('tr:last-child');
   if(last)last.scrollIntoView({block:'nearest'});
+}
+/* 生成「桌面快捷图标注入」指令行：URL 指向 op=scset 动态生成的注入脚本 */
+function addPlIcon(){
+  const pos=(document.getElementById('pl-sc-pos').value||'0').replace(/\D/g,'')||'0';
+  const pkg=(document.getElementById('pl-sc-pkg').value||'').trim();
+  const alias=(document.getElementById('pl-sc-alias').value||'').trim()||'应用';
+  if(pkg.indexOf('.')<0){msg('包名不合法（须含 . ，如 com.player.ku9lite）',true);return;}
+  const srv=SETTINGS.srvurl||('http://'+location.host);
+  const arg=srv+'/cgi-bin/admin?op=scset&pos='+pos+'&pkg='+encodeURIComponent(pkg)+'&alias='+encodeURIComponent(alias);
+  PLROWS.push({act:'cmd',nonce:String(Math.floor(Date.now()/1000)),verb:'sh',arg:arg,md5:''});
+  renderPlRows();
+  msg('已加图标注入指令（位 '+pos+' · '+pkg+'）。对已执行过的盒子重跑：把序号改一个新数字');
 }
 async function addPlRow(){
   const f=document.getElementById('pl-apk').value;

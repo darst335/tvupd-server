@@ -62,6 +62,41 @@ case "$QUERY_STRING" in
     ;;
 esac
 
+# ---- 盒子上报 / 桌面图标脚本生成：客户盒在外网访问，无敏感数据返回 ----
+# op=devrep  盒子端脚本回报桌面信息（lp=包名 lv=版本 lr=结果 cols=表结构摘要/库清单），记 launcher.log
+# op=scset   按参数（pos/pkg/alias）生成快捷图标注入 sh 脚本（模板 /srv/tvupd/ku9/sc-icon-tpl.sh）
+case "$QUERY_STRING" in
+*op=devrep*)
+    DSN=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*[?&]sn=\([A-Za-z0-9._-]\{1,64\}\).*/\1/p')
+    DLP=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*[?&]lp=\([A-Za-z0-9._-]\{1,80\}\).*/\1/p')
+    DLV=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*[?&]lv=\([A-Za-z0-9._-]\{1,40\}\).*/\1/p')
+    DLR=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*[?&]lr=\([a-z]\{1,12\}\).*/\1/p')
+    DCS=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*[?&]cols=\([A-Za-z0-9_.,()]\{1,120\}\).*/\1/p')
+    mkdir -p "$PRIV" 2>/dev/null
+    printf '%s|%s|%s|%s|%s|%s|%s\n' "$(date '+%F %T')" "$DSN" "$DLP" "$DLV" "$DLR" "$DCS" "$REMOTE_ADDR" >> "$PRIV/launcher.log"
+    printf 'Status: 200\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-cache\r\n\r\n{"ok":1}\n'
+    exit 0
+    ;;
+*op=scset*)
+    SPOS=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*[?&]pos=\([0-9]\{1,2\}\).*/\1/p')
+    case "$SPOS" in "") SPOS=0 ;; esac
+    [ "$SPOS" -le 99 ] || SPOS=0
+    SPKG=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*[?&]pkg=\([A-Za-z0-9._-]\{1,120\}\).*/\1/p')
+    case "$SPKG" in *.*) ;; *) SPKG="com.player.ku9lite" ;; esac
+    # alias：先抓原始串（可含 CJK/% 编码），percent 解码，再删危险字符（tr 八进制：" ' | ; ` $ & < > * ! % \ CR LF /）
+    SALIAS=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*[?&]alias=\([^&]\{1,120\}\).*/\1/p')
+    SALIAS=$(printf '%s' "$SALIAS" | sed 's/%/\\x/g')
+    SALIAS=$(printf '%b' "$SALIAS" 2>/dev/null)
+    SALIAS=$(printf '%s' "$SALIAS" | tr -d '\042\047\174\073\140\044\046\074\076\052\041\045\134\015\012\057')
+    [ -n "$SALIAS" ] || SALIAS="应用"
+    printf 'Status: 200\r\nContent-Type: application/x-sh; charset=utf-8\r\nCache-Control: no-cache\r\n\r\n'
+    sed "s|@SRV@|$SRVURL|g;s|@POS@|$SPOS|g;s|@PKG@|$SPKG|g;s|@ALIAS@|$SALIAS|g" /srv/tvupd/ku9/sc-icon-tpl.sh 2>/dev/null \
+        || echo '#!/system/bin/sh
+echo dbsc: template-missing'
+    exit 0
+    ;;
+esac
+
 case "$SRCIP" in
     $SRCNET*) ;;
     *)
@@ -152,14 +187,23 @@ dashboard)
         LC=$(awk -F'|' -v k="$KL" 'toupper($2)==k' "$PRIV/cmds.log" 2>/dev/null | tail -n 1)
         LCMD=""
         [ -n "$LC" ] && LCMD=$(printf '%s' "$LC" | cut -d'|' -f3 | cut -c 1-160)
+        # 最近一次桌面探测上报（launcher.log：时间|sn|包名|版本|结果|摘要|ip）
+        LL=$(awk -F'|' -v k="$KL" 'toupper($2)==k' "$PRIV/launcher.log" 2>/dev/null | tail -n 1)
+        LPK=""; LVR=""; LRT=""
+        [ -n "$LL" ] && {
+            LPK=$(printf '%s' "$LL" | cut -d'|' -f3)
+            LVR=$(printf '%s' "$LL" | cut -d'|' -f4)
+            LRT=$(printf '%s' "$LL" | cut -d'|' -f5)
+        }
         [ "$FIRST" = "1" ] || echo ','
         FIRST=0
-        printf '{"id":%s,"plan":%s,"note":%s,"last_time":%s,"ip":%s,"geo":%s,"sdk":%s,"model":%s,"online":%s,"up":%s,"mem":%s,"tn":%s,"ta":%s,"cmd":%s,"mac":%s}' \
+        printf '{"id":%s,"plan":%s,"note":%s,"last_time":%s,"ip":%s,"geo":%s,"sdk":%s,"model":%s,"online":%s,"up":%s,"mem":%s,"tn":%s,"ta":%s,"cmd":%s,"mac":%s,"lp":%s,"lv":%s,"lr":%s}' \
             "$(json_str "$ID")" "$(json_str "$PLAN")" "$(json_str "$NOTE")" \
             "$(json_str "$LT")" "$(json_str "$LIP")" "$(json_str "$GEO")" \
             "$(json_str "$LSDK")" "$(json_str "$LMD")" "$ON" \
             "$(json_str "$LUP")" "$(json_str "$LMEM")" "$(json_str "$LTN")" \
-            "$(json_str "$LTA")" "$(json_str "$LCMD")" "$(json_str "$LMAC")"
+            "$(json_str "$LTA")" "$(json_str "$LCMD")" "$(json_str "$LMAC")" \
+            "$(json_str "$LPK")" "$(json_str "$LVR")" "$(json_str "$LRT")"
     done
     echo '],'
     echo '"unknown":['
