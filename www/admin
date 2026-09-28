@@ -26,6 +26,42 @@ APKS="$APKS_DIR"
 
 # ---- 来源限制：管理接口只允许局域网网段 ----
 SRCIP=$(printf '%s' "$REMOTE_ADDR" | tr -cd '0-9.')
+
+# ---- 酷9 分发接口：客户盒在外网访问，不走网段白名单，按序列号授权 ----
+# op=ku9cfg  按盒生成 Configuration.json（LIVE_URLS 指向该盒专属订阅地址）
+# op=ku9pl   输出频道列表（每盒拉取都记日志，泄露可定位到盒）
+# 授权：PRIV/ku9-allow.txt 一行一个序列号，# 开头为注释；不在名单 = 403
+case "$QUERY_STRING" in
+*op=ku9cfg*|*op=ku9pl*)
+    KU9OP=ku9pl
+    case "$QUERY_STRING" in *op=ku9cfg*) KU9OP=ku9cfg ;; esac
+    KSN=$(printf '%s' "$QUERY_STRING" | sed -n 's/.*[?&]sn=\([A-Za-z0-9._-]\{1,64\}\).*/\1/p')
+    ALLOWED=0
+    if [ -n "$KSN" ] && [ -s "$PRIV/ku9-allow.txt" ]; then
+        while IFS= read -r kline; do
+            case "$kline" in ""|\#*) continue ;; esac
+            [ "$kline" = "$KSN" ] && { ALLOWED=1; break; }
+        done < "$PRIV/ku9-allow.txt"
+    fi
+    printf '%s %s sn=%s ip=%s\n' "$(date '+%F %T')" "$KU9OP" "${KSN:-none}" "$REMOTE_ADDR" >> "$PRIV/ku9-access.log"
+    if [ "$ALLOWED" != "1" ]; then
+        printf 'Status: 403\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nforbidden\n'
+        exit 0
+    fi
+    if [ "$KU9OP" = "ku9pl" ]; then
+        printf 'Status: 200\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-cache\r\n\r\n'
+        cat "$PRIV/ku9-list.txt" 2>/dev/null
+        exit 0
+    fi
+    # ku9cfg：模板里的 @LIVE@ 替换为该盒专属订阅地址（酷9 LIVE_URLS 格式：地址$名称）
+    KLIVE="$SRVURL/cgi-bin/admin?op=ku9pl&sn=$KSN\$泉州台"
+    KESC=$(printf '%s' "$KLIVE" | sed 's/[&]/\\&/g')
+    printf 'Status: 200\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-cache\r\n\r\n'
+    sed "s|@LIVE@|$KESC|g" "$PRIV/ku9-conf-tpl.json" 2>/dev/null || echo '{"Configuration":{"LIVE_URLS":null}}'
+    exit 0
+    ;;
+esac
+
 case "$SRCIP" in
     $SRCNET*) ;;
     *)

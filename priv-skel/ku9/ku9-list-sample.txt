@@ -1,0 +1,2 @@
+示例频道,#genre#
+示例频道1,http://A/ku9/js/your.js?id=ch1
