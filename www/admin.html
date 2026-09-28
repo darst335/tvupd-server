@@ -151,7 +151,7 @@ pre.log{background:#161b22;color:#c9d1d9;font:12px/1.5 Consolas,monospace;paddin
       <label class="pri" style="display:inline-block;cursor:pointer">⬆ 上传 APK（可多选）
         <input type="file" id="apk-file" accept=".apk" multiple style="display:none" onchange="uploadApks(this.files)">
       </label>
-      <span class="muted">上传自动按包名命名、并读取 APK 内定义的应用名作为中文名（可改）；旧文件名不规范的点「改为包名」</span>
+      <span class="muted">上传自动按包名命名、并读取 APK 内定义的应用名作为中文名（可改）；打开页面会自动为存量 APK 补齐包名/中文名，旧文件名不规范的点「改为包名」</span>
     </div>
     <table id="t-ap"><thead><tr>
       <th style="width:19%">文件名</th><th style="width:13%">中文名</th><th style="width:17%">包名</th><th style="width:7%">大小</th><th style="width:18%">md5</th><th style="width:26%">操作</th>
@@ -379,6 +379,7 @@ function enter(){
     if(u2)u2.textContent=base+'/cgi-bin/manifest?serial=SELFTEST&mac=000000000000&sdk=19&model=SelfTest';
   });
   show('ov');
+  loadApks(); // 进页面就预加载 APK 库（含自动补齐包名/中文名），不用等点开标签页
 }
 
 /* ---- 导航 ---- */
@@ -799,6 +800,10 @@ async function savePlan(){
 /* ---- APK 库 ---- */
 async function loadApks(){
   const d=await api('apks');APKLIST=d.apks||[];
+  renderApks();
+  autoEnrich(); // 存量 APK 缺包名/中文名的后台自动补齐
+}
+function renderApks(){
   const tb=document.querySelector('#t-ap tbody');tb.innerHTML='';
   APKLIST.forEach((a,i)=>{
     const lb=a.label||DEFAULT_LABELS[a.pkg]||'';
@@ -817,6 +822,28 @@ async function loadApks(){
       </td></tr>`);
   });
   if(!APKLIST.length)tb.innerHTML='<tr><td colspan="6" class="muted">还没有 APK，点上面「上传 APK」。</td></tr>';
+}
+/* 存量 APK 自动补齐：逐个下载缺信息的 APK，解析包名/中文名并缓存到服务器（只补缺失字段，不覆盖已设值） */
+let ENRICH_BUSY=false;
+async function autoEnrich(){
+  if(ENRICH_BUSY)return;
+  const need=APKLIST.filter(a=>!a.pkg||!a.label);
+  if(!need.length)return;
+  ENRICH_BUSY=true;
+  try{
+    msg('正在后台读取 '+need.length+' 个 APK 的包名/中文名…');
+    let done=0;
+    for(const a of need){
+      try{
+        const r=await fetch('apks/'+encodeURIComponent(a.file));
+        if(!r.ok)continue;
+        const m=await apkMetaFromBytes(new Uint8Array(await r.arrayBuffer()));
+        if(m.pkg&&!a.pkg){a.pkg=m.pkg;api('set_pkg',{name:a.file},m.pkg);done++;}
+        if(m.label&&!a.label){a.label=m.label;api('set_label',{name:a.file},m.label);done++;}
+      }catch(e){}
+    }
+    if(done){renderApks();syncRmpkgs();msg('已从 APK 内部自动补齐 '+done+' 项包名/中文名');}
+  }finally{ENRICH_BUSY=false;}
 }
 async function setLabel(i){
   const a=APKLIST[i];
