@@ -1,0 +1,65 @@
+#!/bin/sh
+# manifest —— 盒子清单分发 CGI（lighttpd /cgi-bin/）
+# 根据 QUERY_STRING 的 id(序列号)/mac(去冒号) 查设备档案表，返回该盒子的专属方案
+# 每次请求写 access.log：时间|序列号|MAC|来源IP|安卓SDK|机型|方案|备注|运行时长h|可用内存MB|应用数|应用清单
+# 若带 cmd 参数（上一轮远程指令的执行回执）另写 cmds.log：时间|序列号|回执
+PRIV=/srv/tvupd-priv
+
+Q="$QUERY_STRING"
+
+# 提取参数（严格过滤防注入；id/mac 只允许字母数字_-，sdk 只允许数字，model 允许 ._-）
+ID=$(printf '%s' "$Q" | sed -n 's/.*id=\([A-Za-z0-9_-]\{1,64\}\).*/\1/p')
+MAC=$(printf '%s' "$Q" | sed -n 's/.*mac=\([A-Za-z0-9]\{1,20\}\).*/\1/p')
+SDK=$(printf '%s' "$Q" | sed -n 's/.*sdk=\([0-9]\{1,3\}\).*/\1/p')
+MODEL=$(printf '%s' "$Q" | sed -n 's/.*model=\([A-Za-z0-9._-]\{1,64\}\).*/\1/p')
+GRP=$(printf '%s' "$Q" | sed -n 's/.*group=\([A-Za-z0-9_-]\{1,32\}\).*/\1/p')
+
+# 盒子自述的运行状态（可选；老版本固件的 updater 不带这几个参数）
+UP=$(printf '%s' "$Q" | sed -n 's/.*up=\([0-9]\{1,6\}\).*/\1/p')
+MEM=$(printf '%s' "$Q" | sed -n 's/.*mem=\([0-9]\{1,6\}\).*/\1/p')
+TN=$(printf '%s' "$Q" | sed -n 's/.*tn=\([0-9]\{1,4\}\).*/\1/p')
+# 注意：busybox sed 的重复上限是 255（POSIX RE_DUP_MAX），写 \{1,400\} 会让整个模式
+# 编译失败并静默不匹配 —— 这里用无界 * 再 cut 截断。
+TA=$(printf '%s' "$Q" | sed -n 's/.*ta=\([A-Za-z0-9._,-]*\).*/\1/p' | cut -c 1-400)
+CMDREP=$(printf '%s' "$Q" | sed -n 's/.*cmd=\([A-Za-z0-9._:;,-]*\).*/\1/p' | cut -c 1-400)
+
+# 来源 IP（lighttpd 注入）
+IP=$(printf '%s' "$REMOTE_ADDR" | tr -cd '0-9a-fA-F:.')
+[ -n "$IP" ] || IP=-
+
+PLAN=""
+NOTE=""
+for key in "$ID" "$MAC"; do
+    [ -n "$key" ] || continue
+    LINE=$(grep -i "^$key|" "$PRIV/devices.txt" 2>/dev/null | tail -n 1)
+    if [ -n "$LINE" ]; then
+        PLAN=$(printf '%s' "$LINE" | cut -d'|' -f2)
+        NOTE=$(printf '%s' "$LINE" | cut -d'|' -f3 | tr -d '|' | cut -c 1-64)
+        break
+    fi
+done
+
+case "$PLAN" in *[!A-Za-z0-9_-]*|"") PLAN=default;; esac
+F="$PRIV/plans/$PLAN.txt"
+[ -f "$F" ] || { PLAN=default; F="$PRIV/plans/default.txt"; }
+[ -n "$NOTE" ] || NOTE=未登记
+[ -n "$SDK" ] || SDK=-
+[ -n "$MODEL" ] || MODEL=-
+[ -n "$UP" ] || UP=-
+[ -n "$MEM" ] || MEM=-
+[ -n "$TN" ] || TN=-
+
+echo "$(date '+%Y-%m-%d %H:%M:%S')|$ID|$MAC|$IP|$SDK|$MODEL|$PLAN|$NOTE|$UP|$MEM|$TN|$TA" >> "$PRIV/access.log"
+
+# 远程指令回执（盒子把上一轮 cmd 行的执行结果带回来）
+if [ -n "$CMDREP" ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S')|$ID|$CMDREP" >> "$PRIV/cmds.log"
+    # 只留最近 500 条
+    if [ "$(wc -l < "$PRIV/cmds.log" 2>/dev/null)" -gt 500 ]; then
+        tail -n 500 "$PRIV/cmds.log" > "$PRIV/cmds.log.t" && mv "$PRIV/cmds.log.t" "$PRIV/cmds.log"
+    fi
+fi
+
+LEN=$(wc -c < "$F")
+printf 'Content-Type: text/plain; charset=utf-8\r\nContent-Length: %s\r\n\r\n' "$LEN"
+cat "$F"

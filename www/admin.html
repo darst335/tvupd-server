@@ -1,0 +1,982 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>盒子管理控制台</title>
+<style>
+:root{--bg:#f5f6f8;--card:#fff;--line:#e3e6ea;--tx:#24292f;--sub:#6a737d;--ok:#1a7f37;--warn:#b45309;--bad:#cf222e;--accent:#0969da}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font:14px/1.6 "Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+header{background:var(--card);border-bottom:1px solid var(--line);padding:12px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+header h1{font-size:17px}
+header .sub{color:var(--sub);font-size:12px}
+nav{display:flex;gap:6px}
+nav button{border:1px solid var(--line);background:var(--bg);padding:6px 14px;border-radius:6px;cursor:pointer;font-size:13px}
+nav button.act{background:var(--accent);color:#fff;border-color:var(--accent)}
+main{max-width:1360px;margin:16px auto;padding:0 16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin-bottom:14px;overflow-x:auto}
+.card h2{font-size:14px;margin-bottom:10px;color:var(--sub);font-weight:600}
+#t-ov,#t-cmd,#t-ap,#t-unc{min-width:980px}
+.stats{display:flex;gap:12px;flex-wrap:wrap}
+.stat{flex:1;min-width:130px;background:var(--bg);border-radius:8px;padding:12px;text-align:center}
+.stat b{font-size:24px;display:block}
+.stat span{font-size:12px;color:var(--sub)}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{border-bottom:1px solid var(--line);padding:7px 8px;text-align:left;vertical-align:top}
+th{color:var(--sub);font-weight:600;background:var(--bg)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px}
+.on{background:var(--ok)}.off{background:#c9cdd3}
+.badge{display:inline-block;background:#ddf4ff;color:var(--accent);border-radius:10px;padding:0 8px;font-size:12px}
+textarea{width:100%;min-height:120px;font:12px/1.5 Consolas,monospace;border:1px solid var(--line);border-radius:6px;padding:10px;background:#fbfbfc}
+button.pri{background:var(--accent);color:#fff;border:0;padding:8px 18px;border-radius:6px;cursor:pointer}
+button.pri:disabled{opacity:.5}
+button.mini{border:1px solid var(--line);background:#fff;border-radius:5px;padding:3px 10px;cursor:pointer;font-size:12px}
+button.mini.red{color:var(--bad);border-color:#f0c6c6}
+button.mini:hover{background:#f6f8fa}
+select,input{border:1px solid var(--line);border-radius:6px;padding:5px 8px;font-size:13px}
+.err{color:var(--bad)}.okm{color:var(--ok)}
+.muted{color:var(--sub);font-size:12px}
+.mono{font-family:Consolas,monospace;font-size:12px}
+pre.log{background:#161b22;color:#c9d1d9;font:12px/1.5 Consolas,monospace;padding:12px;border-radius:6px;overflow:auto;max-height:340px;white-space:pre-wrap}
+.copy{border:1px solid var(--line);background:#fff;border-radius:5px;padding:2px 8px;cursor:pointer;font-size:12px}
+.note-cell{cursor:pointer;border-bottom:1px dashed #b6bcc2}
+.note-cell:hover{color:var(--accent)}
+#login{max-width:340px;margin:80px auto;text-align:center}
+#login input{width:100%;margin:12px 0;text-align:center;padding:10px}
+.hidden{display:none}
+.rowtbl input,.rowtbl select{width:100%;min-width:60px}
+.geo{display:block;color:var(--sub);font-size:11px}
+.bar{display:flex;gap:10px;margin-bottom:10px;align-items:center;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<div id="login">
+  <div class="card">
+    <h2 style="text-align:center">🔐 盒子管理控制台</h2>
+    <input type="password" id="pwd" placeholder="管理密码">
+    <button class="pri" style="width:100%" onclick="login()">进入</button>
+    <p class="muted" id="lerr"></p>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+<header>
+  <h1>📺 盒子管理控制台</h1>
+  <span class="sub" id="now"></span>
+  <nav>
+    <button class="act" data-v="ov">总览</button>
+    <button data-v="dv">盒子与方案</button>
+    <button data-v="pl">软件方案</button>
+    <button data-v="ap">APK 库</button>
+    <button data-v="cmd">收发记录</button>
+    <button data-v="geo">客户分布</button>
+    <button data-v="set">系统设置</button>
+  </nav>
+  <span style="flex:1"></span>
+  <span class="muted" id="msg"></span>
+</header>
+<main>
+
+<section id="v-ov">
+  <div class="card"><h2>运行统计</h2>
+    <div class="stats">
+      <div class="stat"><b id="s-reg">-</b><span>登记盒子</span></div>
+      <div class="stat"><b id="s-on" style="color:var(--ok)">-</b><span>24h 内在线</span></div>
+      <div class="stat"><b id="s-un" style="color:var(--warn)">-</b><span>未登记设备</span></div>
+      <div class="stat"><b id="s-pl">-</b><span>方案数</span></div>
+    </div>
+  </div>
+  <div class="card"><h2>盒子状态（绿点=24h 内在线，点备注可直接修改）</h2>
+    <table id="t-ov"><thead><tr>
+      <th>状态</th><th>方案</th><th>备注 ✏</th><th>最后在线</th><th>IP / 归属地</th><th>机型</th><th>安卓</th><th>运行 / 内存</th><th>已装应用</th><th>身份（序列号/兼）</th><th>指令回执</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card"><h2>未登记设备（来拉过清单但不在档案表）</h2>
+    <table id="t-un"><thead><tr><th>状态</th><th>身份</th><th>操作</th><th>最后在线</th><th>IP / 归属地</th><th>机型</th><th>安卓</th></tr></thead><tbody></tbody></table>
+    <p class="muted">点「登记」直接跳到档案表并填好身份，选方案保存即可纳管。</p>
+  </div>
+  <div class="card"><h2>最近访问日志</h2><pre class="log" id="logview">加载中…</pre></div>
+</section>
+
+<section id="v-dv" class="hidden">
+  <div class="card"><h2>设备档案表</h2>
+    <div class="bar">
+      <button class="pri" onclick="addDevRow()">＋ 添加盒子</button>
+      <span class="muted">方案下拉选择 · 未登记身份的盒子自动走 default · 保存后 10 分钟内全网生效</span>
+    </div>
+    <table class="rowtbl" id="t-dv"><thead><tr>
+      <th style="width:34%">身份（序列号或去冒号MAC）</th><th style="width:18%">方案</th><th style="width:36%">备注（客户/位置）</th><th style="width:6%"></th>
+    </tr></thead><tbody></tbody></table>
+    <datalist id="dv-ids"></datalist>
+    <p class="muted" style="margin:10px 0">身份输入框点击/输入可下拉选择「未登记设备」里来过的盒子，不用手打；
+      方案下拉选择 · 未登记身份的盒子自动走 default · 保存后 10 分钟内全网生效</p>
+    <p class="muted" style="margin:10px 0">
+      <label><input type="checkbox" id="dv-rawmode" onchange="dvRawToggle()"> 文本模式（批量编辑，每行：身份|方案|备注）</label>
+    </p>
+    <textarea id="dv-editor" spellcheck="false" class="hidden"></textarea>
+    <button class="pri" onclick="saveDevices()">保存档案表</button>
+  </div>
+</section>
+
+<section id="v-pl" class="hidden">
+  <div class="card"><h2>软件方案编辑</h2>
+    <div class="bar">
+      <select id="pl-name" onchange="loadPlan()"></select>
+      <input id="pl-new" placeholder="新方案名，如 kids" style="width:130px">
+      <button class="mini" onclick="newPlan()">新建方案</button>
+      <span style="flex:1"></span>
+      <span class="muted">添加哪个 APK →</span>
+      <select id="pl-apk"><option value="">（在 APK 库选一个）</option></select>
+      <button class="pri" id="pl-add" onclick="addPlRow()">＋ 添加软件</button>
+      <button class="mini" onclick="addPlCmd()">＋ 添加指令</button>
+    </div>
+    <p class="muted" style="margin:0 0 8px">选中 APK 后点「＋ 添加软件」，包名 / md5 / 下载地址会自动填好；点「＋ 添加指令」给该方案下发一次性远程指令（重启 / 维护 / 救砖脚本等）。</p>
+    <table class="rowtbl" id="t-pl"><thead><tr>
+      <th style="width:12%">动作</th><th style="width:26%">包名 / 指令参数</th><th style="width:28%">md5 / 序号</th><th style="width:28%">下载 URL</th><th style="width:6%"></th>
+    </tr></thead><tbody></tbody></table>
+    <datalist id="rmpkgs"></datalist>
+    <p class="muted" style="margin:8px 0">⚠ <b>remove</b> 只作用于「我们分发过」的应用：本方案 install 列表里的包名，或 APK 库里登记过的包名。用户在盒子上自行安装的其他应用不会被删除，也不会收到任何删除指令；误填其它包名保存时会被服务端直接拒绝。</p>
+    <p class="muted" style="margin:8px 0">方案说明（# 开头，仅管理备注用，不下发）：</p>
+    <textarea id="pl-head" spellcheck="false" style="min-height:60px"></textarea>
+    <div style="margin-top:10px"><button class="pri" id="pl-save" onclick="savePlan()">保存方案</button>
+    <span class="muted" style="margin-left:10px">保存后 10 分钟内该方案下所有盒子自动应用</span></div>
+  </div>
+</section>
+
+<section id="v-ap" class="hidden">
+  <div class="card"><h2>APK 库（路由器 /srv/tvupd/apks/）</h2>
+    <div class="bar">
+      <label class="pri" style="display:inline-block;cursor:pointer">⬆ 上传 APK（可多选）
+        <input type="file" id="apk-file" accept=".apk" multiple style="display:none" onchange="uploadApks(this.files)">
+      </label>
+      <span class="muted">包名会在控制台首次使用该 APK 时自动识别并缓存</span>
+    </div>
+    <table id="t-ap"><thead><tr>
+      <th style="width:19%">文件名</th><th style="width:13%">中文名</th><th style="width:17%">包名</th><th style="width:7%">大小</th><th style="width:18%">md5</th><th style="width:26%">操作</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<section id="v-cmd" class="hidden">
+  <div class="card"><h2>下发远程指令（写入方案文件，该方案下每台盒子只执行一次）</h2>
+    <div class="bar">
+      <span class="muted">目标方案</span><select id="cm-plan"></select>
+      <span class="muted">动作</span>
+      <select id="cm-verb" onchange="cmdVerbChange()">
+        <option value="report">report — 只要回执（测通道通不通）</option>
+        <option value="reboot">reboot — 立即重启</option>
+        <option value="memclean">memclean — 内存回收</option>
+        <option value="clearcache">clearcache — 清应用缓存</option>
+        <option value="dns">dns — 重新固定公共 DNS</option>
+        <option value="wifi">wifi — Wi-Fi 永不休眠</option>
+        <option value="oem">oem — 重新屏蔽运营商组件</option>
+        <option value="maint">maint — 全套日常维护</option>
+        <option value="status">status — 采集盒子状态写日志</option>
+        <option value="sh">sh — 下载脚本并执行（远程救砖）</option>
+      </select>
+      <button class="pri" id="cm-send" onclick="sendCmd()">下发</button>
+    </div>
+    <div id="cm-sh" class="hidden">
+      <p class="muted">脚本 URL（放在本服务器的 scripts/ 目录下）：</p>
+      <input id="cm-url" style="width:100%" placeholder="服务地址/scripts/fix.sh（在系统设置里配置好对外地址后，这里会提示）" spellcheck="false">
+      <p class="muted" style="margin-top:8px">脚本 md5（建议填，校验不过盒子会拒绝执行）：</p>
+      <input id="cm-md5" style="width:100%" placeholder="留空则不校验" spellcheck="false">
+    </div>
+    <p class="muted" style="margin-top:10px">下发后写入该方案文件；盒子下一轮拉清单（≤10 分钟）时执行，序号保证只跑一次。
+      执行结果是回执，由盒子在下一轮带回，自动对到下方收发对照表。</p>
+  </div>
+  <div class="card"><h2>指令收发对照（下发记录 ⨯ 盒子回执）</h2>
+    <div class="bar"><button class="mini" onclick="loadCmds()">刷新</button>
+      <span class="muted">一条下发按方案下的盒子数展开成多行回执；「待回执」= 盒子还没拉到或还没执行完</span></div>
+    <table id="t-cmd"><thead><tr>
+      <th style="width:14%">下发时间</th><th style="width:9%">方案</th><th style="width:11%">动作</th>
+      <th style="width:11%">序号</th><th style="width:8%">状态</th><th>回执明细（盒子 · 回执时间）</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card"><h2>盒子上未收录的应用（不在 APK 库里）</h2>
+    <p class="muted" style="margin:0 0 8px">各盒子心跳上报的安装清单 ∖ APK 库包名。用户自装的应用我们不会去动；
+      如果某个未收录应用确定要删，先把它的 APK 传到 APK 库（拿到包名），再到「软件方案」里加 remove 行。</p>
+    <div class="bar"><button class="mini" onclick="loadCmds()">刷新</button><span id="unc-n" class="muted"></span></div>
+    <table id="t-unc"><thead><tr>
+      <th style="width:34%">包名</th><th style="width:18%">中文名</th><th>出现在哪些盒子</th>
+    </tr></thead><tbody></tbody></table>
+  </div>
+  <div class="card"><h2>本机可达性自检（异地部署前必看）</h2>
+    <p class="muted">在客户家网络的手机上打开下面任意一条，能返回文字就说明异地能拉到清单（返回 404/超时则失败）：</p>
+    <p class="mono" style="margin:6px 0" id="sturl1"></p>
+    <p class="mono" id="sturl2"></p>
+  </div>
+</section>
+
+<section id="v-geo" class="hidden">
+  <div class="card"><h2>客户分布（盒子所在网络归属地，每小时自动刷新）</h2>
+    <div class="stats" style="margin-bottom:10px">
+      <div class="stat"><b id="g-n">-</b><span>盒子 / 网络总数</span></div>
+      <div class="stat"><b id="g-c" style="color:var(--ok)">-</b><span>客户（公网出口）</span></div>
+      <div class="stat"><b id="g-l" style="color:var(--warn)">-</b><span>内网 / 未上线</span></div>
+    </div>
+    <div class="bar">
+      <button class="pri" onclick="loadGeo()">立即刷新</button>
+      <span class="muted" id="g-sum"></span>
+    </div>
+    <table id="t-geo"><thead><tr>
+      <th style="width:16%">备注 / 身份</th><th style="width:8%">方案</th><th style="width:12%">最后在线</th>
+      <th style="width:12%">出口 IP</th><th style="width:14%">归属地</th><th style="width:12%">运营商</th>
+      <th style="width:13%">机型</th><th style="width:6%">安卓</th>
+    </tr></thead><tbody></tbody></table>
+    <details style="margin-top:10px"><summary class="muted" style="cursor:pointer">原始文本报表（geo-lookup.sh 生成）</summary>
+      <pre class="log" id="geoview" style="margin-top:8px"></pre>
+    </details>
+  </div>
+</section>
+
+<section id="v-set" class="hidden">
+  <div class="card"><h2>路由器 / 服务当前状态（只读，来自系统实际配置）</h2>
+    <div class="bar"><button class="mini" onclick="loadSettings()">刷新</button></div>
+    <table id="t-sys"><tbody></tbody></table>
+  </div>
+  <div class="card"><h2>服务参数（保存在路由器 /srv/tvupd-priv/settings.env，全网生效）</h2>
+    <p class="muted" style="margin:0 0 10px">对外服务地址用于生成 install 行和 APK 下载链接（换域名/换路由器时改这里，方案里的旧地址建议同步检查）。
+      来源白名单 = 允许打开管理台的局域网网段前缀。在线判定窗口 = 多久没上报算离线。</p>
+    <table class="rowtbl"><tbody>
+      <tr><th style="width:22%">对外服务地址</th><td><input id="st-srvurl" style="width:80%" placeholder="留空 = 自动用当前访问地址（http://192.168.1.1:8083）" spellcheck="false"></td></tr>
+      <tr><th>来源白名单网段</th><td><input id="st-srcnet" style="width:40%" placeholder="192.168.1." spellcheck="false"><span class="muted" style="margin-left:8px">前缀形式，管理台和接口仅允许该网段访问</span></td></tr>
+      <tr><th>在线判定窗口</th><td><input id="st-online" style="width:80px" placeholder="24"><span class="muted" style="margin-left:8px">小时（1-720）</span></td></tr>
+      <tr><th>APK 存放位置</th><td><input id="st-apks" style="width:60%" placeholder="/srv/tvupd/apks" spellcheck="false"><span class="muted" style="margin-left:8px">改到数据盘等其它目录会自动迁移文件并留软链，下载链接不受影响</span></td></tr>
+    </tbody></table>
+    <div style="margin-top:10px"><button class="pri" onclick="saveSettings()">保存设置</button></div>
+  </div>
+  <div class="card"><h2>管理密码</h2>
+    <p class="muted" style="margin:0 0 10px">控制台登录密码（存在路由器 /srv/tvupd-priv/admin.pwd，6-32 位字母数字）。改完当前浏览器自动换用新密码，其他已登录的浏览器需要重新输入。</p>
+    <table class="rowtbl"><tbody>
+      <tr><th style="width:22%">新密码</th><td><input id="st-pwd1" type="password" style="width:40%" spellcheck="false"></td></tr>
+      <tr><th>再输一遍</th><td><input id="st-pwd2" type="password" style="width:40%" spellcheck="false"></td></tr>
+    </tbody></table>
+    <div style="margin-top:10px"><button class="pri" onclick="setPwd()">修改密码</button></div>
+  </div>
+  <div class="card"><h2>迁移 / 备份</h2>
+    <p class="muted" style="margin:0">整套系统（服务端脚本 + 数据 + LuCI 菜单）已开源打包：<span class="mono">tvupd-server</span>（GitHub）。
+      换路由器 = 新机执行 install.sh → 旧机跑 backup.sh 导出 tar 包 → 新机 restore.sh 导入 → 本页把"对外服务地址"改成新地址。</p>
+  </div>
+</section>
+
+</main>
+</div>
+
+<script>
+const API='/cgi-bin/admin';
+let TOKEN=localStorage.getItem('tvupd_token')||'';
+let PLANS=[], APKLIST=[], DEVROWS=[], PLROWS=[], CURV='ov', SETTINGS={};
+
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+
+/* SDK 级别 → 安卓版本号（盒子上报的是 SDK，用户看的是版本号） */
+const SDK2VER={19:'4.4',21:'5.0',22:'5.1',23:'6.0',24:'7.0',25:'7.1',26:'8.0',27:'8.1',28:'9',29:'10',30:'11',31:'12',32:'12L',33:'13',34:'14',35:'15',36:'16'};
+function sdkTxt(s){
+  if(!s||s==='-')return '-';
+  const v=SDK2VER[String(s)];
+  return v?('Android '+v):('SDK '+s);
+}
+
+/* 同一台盒子可能以多个身份上报（序列号 / MAC / 旧版回退标识），
+   这里按 MAC 归并成一条：主记录取 last_time 最新的，其余身份并入 alt_ids */
+function mergeByMac(arr){
+  const byMac={},out=[];
+  (arr||[]).forEach(x=>{
+    const k=(x.mac||'').toLowerCase();
+    if(!k){x.alt_ids=[];out.push(x);return;}
+    if(byMac[k]){
+      const m=byMac[k];
+      if(String(x.last_time||'')>String(m.last_time||'')){
+        x.alt_ids=m.alt_ids.concat([m.id]);
+        Object.assign(m,x);
+      }else{
+        if(!m.alt_ids.includes(x.id))m.alt_ids.push(x.id);
+      }
+    }else{x.alt_ids=[];byMac[k]=x;out.push(x);}
+  });
+  return out;
+}
+function idCell(x){
+  const alt=(x.alt_ids||[]).map(a=>`<span class="geo">兼 ${esc(a)}</span>`).join(' ');
+  return `<span class="mono small">${esc(x.id)}</span>${alt?'<br>'+alt:''}`;
+}
+
+/* ---- 中文名：APK 库登记的 label 优先，其次内置常见包名映射 ---- */
+const DEFAULT_LABELS={
+  'com.dianshijia.newlive':'电视家',
+  'com.dangbeimarket':'当贝市场',
+  'com.fongmi.android.tv':'影视仓·TVBox',
+  'com.tongyong.xxbox':'影视仓·XX盒子',
+  'com.xiaodianshi.tv.yst':'小电石',
+  'jackpal.androidterm':'终端模拟器'
+};
+function labelOf(pkg){
+  if(!pkg)return '';
+  const a=(APKLIST||[]).find(x=>x.pkg===pkg);
+  if(a&&a.label)return a.label;
+  return DEFAULT_LABELS[pkg]||'';
+}
+/* remove 白名单候选（与后端口径一致）：APK 库登记包名 ∪ 本方案 install 包名 */
+function rmPkgList(){
+  const s=[];
+  (APKLIST||[]).forEach(a=>{if(a.pkg&&s.indexOf(a.pkg)<0)s.push(a.pkg);});
+  PLROWS.forEach(r=>{if(r.act==='install'&&r.pkg&&s.indexOf(r.pkg)<0)s.push(r.pkg);});
+  return s;
+}
+function syncRmpkgs(){
+  const dl=document.getElementById('rmpkgs');if(!dl)return;
+  dl.innerHTML=rmPkgList().map(p=>{
+    const lb=labelOf(p);
+    return `<option value="${esc(p)}">${esc(lb)}</option>`;
+  }).join('');
+}
+
+/* 未登记设备 id 候选（档案表「添加盒子」下拉用） */
+let UNKIDS=[];
+function syncDvIds(){
+  const dl=document.getElementById('dv-ids');if(!dl)return;
+  dl.innerHTML=UNKIDS.map(x=>{
+    const info=[x.model&&x.model!=='-'?x.model:'',x.ip||''].filter(Boolean).join(' · ');
+    return `<option value="${esc(x.id)}">${esc(info)}</option>`;
+  }).join('');
+}
+
+async function api(op,params={},body=null){
+  const q=new URLSearchParams({op,...params});
+  const r=await fetch(API+'?'+q,{method:body!==null?'POST':'GET',headers:{'X-Auth-Token':TOKEN},body});
+  const ct=r.headers.get('content-type')||'';
+  const t=await r.text();
+  if(ct.indexOf('json')>=0){try{return JSON.parse(t)}catch(e){}}
+  return {ok:1,text:t};
+}
+function msg(m,isErr){const el=document.getElementById('msg');el.textContent=m;el.className=isErr?'err':'okm';setTimeout(()=>{if(el.textContent===m)el.textContent='';},4000);}
+function fmtCmd(s){
+  if(!s)return '<span class="muted">—</span>';
+  return s.split(';').filter(Boolean).map(p=>{
+    const a=p.split('|');
+    const res=a[2]||'';const cls=res==='ok'?'okm':'err';
+    return `<span class="${cls}" title="${esc(p)}">${esc(a[1]||'')}:${esc(res)}</span>`;
+  }).join('<br>');
+}
+
+async function login(){
+  TOKEN=document.getElementById('pwd').value.trim();
+  const d=await api('dashboard');
+  if(d.ok){localStorage.setItem('tvupd_token',TOKEN);enter();}else{document.getElementById('lerr').textContent='密码错误';}
+}
+function enter(){
+  document.getElementById('login').classList.add('hidden');
+  document.getElementById('app').classList.remove('hidden');
+  api('get_settings').then(a=>{
+    if(a.ok)SETTINGS=a;
+    // 自检地址跟随「系统设置 → 对外服务地址」
+    const base=SETTINGS.srvurl||('http://'+location.host);
+    const u1=document.getElementById('sturl1'),u2=document.getElementById('sturl2');
+    if(u1)u1.textContent=base+'/apps.txt';
+    if(u2)u2.textContent=base+'/cgi-bin/manifest?serial=SELFTEST&mac=000000000000&sdk=19&model=SelfTest';
+  });
+  show('ov');
+}
+
+/* ---- 导航 ---- */
+function show(v){
+  CURV=v;
+  document.querySelectorAll('nav button').forEach(x=>x.classList.toggle('act',x.dataset.v===v));
+  ['ov','dv','pl','ap','cmd','geo','set'].forEach(k=>document.getElementById('v-'+k).classList.toggle('hidden',k!==v));
+  ({ov:refresh,dv:loadDevices,pl:loadPlanList,ap:loadApks,cmd:loadCmds,geo:loadGeo,set:loadSettings})[v]();
+}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>show(b.dataset.v));
+
+/* ---- 总览 ---- */
+async function refresh(){
+  const d=await api('dashboard');
+  if(!d.ok){msg(d.err||'',true);return;}
+  document.getElementById('now').textContent='数据时间 '+d.now;
+  const devs=mergeByMac(d.devices||[]), unk=mergeByMac(d.unknown||[]);
+  UNKIDS=unk;syncDvIds();
+  const onReg=devs.filter(x=>x.online).length, onUnk=unk.filter(x=>x.online).length;
+  document.getElementById('s-reg').textContent=devs.length;
+  document.getElementById('s-on').textContent=(onReg+onUnk)+'（登记 '+onReg+' / 未登记 '+onUnk+'）';
+  document.getElementById('s-un').textContent=unk.length+(onUnk?('（在线 '+onUnk+'）'):'');
+  document.getElementById('s-pl').textContent=(d.plans||[]).length;
+  PLANS=d.plans||[];
+  const tb=document.querySelector('#t-ov tbody');tb.innerHTML='';
+  devs.forEach(x=>{
+    const apps=(x.ta||'').split(',').filter(Boolean);
+    const shown=apps.slice(0,2).map(p=>labelOf(p)||p);
+    tb.insertAdjacentHTML('beforeend',`<tr>
+      <td><span class="dot ${x.online?'on':'off'}"></span>${x.online?'在线':'离线'}</td>
+      <td><span class="badge">${esc(x.plan)}</span></td>
+      <td><span class="note-cell" onclick="editNote('${esc(x.id)}',this)" title="点击修改备注">${esc(x.note)||'<span class=muted>点击填写</span>'}</span></td>
+      <td>${esc(x.last_time)||'从未'}</td>
+      <td><span class="mono">${esc(x.ip)||'-'}</span><span class="geo">${esc(x.geo)||''}</span></td>
+      <td class="mono">${esc(x.model)||'-'}</td><td>${sdkTxt(x.sdk)}</td>
+      <td>${x.up?esc(x.up)+' 小时':'-'}<span class="geo">${x.mem?('可用 '+esc(x.mem)+'MB'):''}</span></td>
+      <td><span title="${apps.length?esc(apps.join('\n')):'（盒子尚未上报）'}">${x.tn?esc(x.tn)+' 个':'—'}</span>${shown.length?`<div class="geo" style="margin-top:2px">${esc(shown.join('、'))}${apps.length>2?(' 等'+apps.length+'个'):''}</div>`:''}</td>
+      <td class="mono small">${idCell(x)}</td>
+      <td class="small">${fmtCmd(x.cmd)}</td></tr>`);
+  });
+  const tu=document.querySelector('#t-un tbody');tu.innerHTML='';
+  unk.forEach(x=>{
+    tu.insertAdjacentHTML('beforeend',`<tr>
+      <td><span class="dot ${x.online?'on':'off'}"></span>${x.online?'在线':'离线'}</td>
+      <td class="mono">${idCell(x)}</td>
+      <td><button class="mini" onclick="prefillDevice('${esc(x.id)}')">登记</button></td>
+      <td>${esc(x.last_time)||''}</td>
+      <td><span class="mono">${esc(x.ip)||''}</span><span class="geo">${esc(x.geo)||''}</span></td>
+      <td class="mono">${esc(x.model)||'-'}</td><td>${sdkTxt(x.sdk)}</td></tr>`);
+  });
+  const lt=await api('logtail');
+  document.getElementById('logview').textContent=lt.text||'（空）';
+}
+async function editNote(id,el){
+  const cur=el.textContent.trim();
+  const n=prompt('修改备注（客户 / 位置信息）：',cur==='点击填写'?'':cur);
+  if(n===null)return;
+  const r=await api('save_note',{id:id},n);
+  if(r.ok){msg('备注已保存');refresh();}else msg(r.err||'保存失败',true);
+}
+function prefillDevice(id){
+  show('dv');
+  if(!DEVROWS.some(r=>r.id===id))DEVROWS.push({id:id,plan:'default',note:''});
+  renderDevRows();
+  msg('已填入身份 '+id+'，选择方案后保存');
+}
+
+/* ---- 盒子与方案（结构化） ---- */
+function planOptions(sel){
+  const all=Array.from(new Set(PLANS.concat(DEVROWS.map(r=>r.plan).filter(Boolean))));
+  return all.map(p=>`<option ${p===sel?'selected':''}>${esc(p)}</option>`).join('');
+}
+function renderDevRows(){
+  const tb=document.querySelector('#t-dv tbody');tb.innerHTML='';
+  DEVROWS.forEach((r,i)=>{
+    tb.insertAdjacentHTML('beforeend',`<tr>
+      <td><input value="${esc(r.id)}" list="dv-ids" oninput="DEVROWS[${i}].id=this.value" placeholder="序列号或MAC（可下拉选未登记设备）" spellcheck="false"></td>
+      <td><select onchange="DEVROWS[${i}].plan=this.value">${planOptions(r.plan)}</select></td>
+      <td><input value="${esc(r.note)}" oninput="DEVROWS[${i}].note=this.value" placeholder="如：张三-台江-138xx"></td>
+      <td><button class="mini red" onclick="delDevRow(${i})">删</button></td></tr>`);
+  });
+  if(!DEVROWS.length)tb.innerHTML='<tr><td colspan="4" class="muted">还没有盒子，点上面「＋ 添加盒子」</td></tr>';
+}
+function addDevRow(){DEVROWS.push({id:'',plan:'default',note:''});renderDevRows();}
+function delDevRow(i){DEVROWS.splice(i,1);renderDevRows();}
+function dvRawToggle(){
+  const raw=document.getElementById('dv-rawmode').checked;
+  const ta=document.getElementById('dv-editor'),tb=document.querySelector('#t-dv');
+  ta.classList.toggle('hidden',!raw);tb.classList.toggle('hidden',raw);
+  if(raw)ta.value=DEVROWS.filter(r=>r.id).map(r=>[r.id,r.plan,r.note].join('|')).join('\n');
+  else{ // 从文本解析回来
+    DEVROWS=[];
+    ta.value.split('\n').forEach(l=>{l=l.trim();if(!l||l.startsWith('#'))return;
+      const p=l.split('|');if(p[0])DEVROWS.push({id:p[0],plan:p[1]||'default',note:p[2]||''});});
+    renderDevRows();
+  }
+}
+async function loadDevices(){
+  const d=await api('get_devices');
+  DEVROWS=[];
+  ((d.text||'').split('\n')).forEach(l=>{l=l.trim();
+    if(!l||l.startsWith('#'))return;
+    const p=l.split('|');
+    if(/^[A-Za-z0-9_-]+$/.test(p[0]||''))DEVROWS.push({id:p[0],plan:p[1]||'default',note:p[2]||''});
+  });
+  document.getElementById('dv-rawmode').checked=false;
+  document.getElementById('dv-editor').classList.add('hidden');
+  document.querySelector('#t-dv').classList.remove('hidden');
+  renderDevRows();
+  // 拉一次未登记设备，给身份输入框做下拉候选
+  api('dashboard').then(d=>{if(d.ok){UNKIDS=mergeByMac(d.unknown||[]);syncDvIds();}});
+}
+async function saveDevices(){
+  const bad=DEVROWS.filter(r=>r.id&&!/^[A-Za-z0-9_-]+$/.test(r.id)||r.id&&!/^[A-Za-z0-9_-]+$/.test(r.plan));
+  if(bad.length){msg('有行的身份/方案含非法字符（只能字母数字_-）',true);return;}
+  const dup=DEVROWS.map(r=>r.id.toUpperCase()).filter((v,i,a)=>v&&a.indexOf(v)!==i);
+  if(dup.length){msg('身份重复：'+dup[0],true);return;}
+  const txt=DEVROWS.filter(r=>r.id&&r.plan).map(r=>[r.id,r.plan,r.note].join('|')).join('\n');
+  const b=document.querySelector('#v-dv button.pri');b.disabled=true;
+  const r=await api('save_devices',{},txt);
+  b.disabled=false;msg(r.ok?'档案表已保存，10 分钟内生效':'保存失败：'+(r.err||''),!r.ok);
+}
+
+/* ---- 软件方案（结构化） ---- */
+async function loadPlanList(){
+  const d=await api('dashboard');
+  if(!d.ok)return;
+  PLANS=d.plans||[];
+  const s=document.getElementById('pl-name');
+  const cur=s.value;
+  s.innerHTML=PLANS.map(p=>`<option>${esc(p)}</option>`).join('')||'<option value="">（暂无方案，先新建）</option>';
+  if(PLANS.includes(cur))s.value=cur;
+  if(s.value)loadPlan();
+  const ad=await api('apks');APKLIST=ad.apks||[];
+  const as=document.getElementById('pl-apk');
+  as.innerHTML='<option value="">（在 APK 库选一个）</option>'+APKLIST.map(a=>{
+    const lb=a.label||DEFAULT_LABELS[a.pkg]||'';
+    return `<option value="${esc(a.file)}">${esc(a.file)}${lb?('（'+esc(lb)+'）'):''}</option>`;
+  }).join('');
+}
+async function loadPlan(){
+  const n=document.getElementById('pl-name').value;if(!n)return;
+  const d=await api('get_plan',{name:n});
+  const lines=(d.text||'').split('\n');
+  document.getElementById('pl-head').value=lines.filter(l=>l.trim().startsWith('#')).join('\n');
+  PLROWS=lines.filter(l=>{l=l.trim();return l&&!l.startsWith('#');}).map(l=>{
+    const p=l.split('|');
+    if(p[0]==='cmd')return {act:'cmd',nonce:p[1]||'',verb:p[2]||'',arg:p[3]||'',md5:p[4]||''};
+    return {act:p[0]==='remove'?'remove':'install',pkg:p[1]||'',md5:p[2]||'',url:p[3]||''};
+  });
+  renderPlRows();
+}
+function renderPlRows(){
+  const tb=document.querySelector('#t-pl tbody');tb.innerHTML='';
+  const VERBS=['report','reboot','memclean','clearcache','dns','wifi','oem','maint','status','sh'];
+  PLROWS.forEach((r,i)=>{
+    if(r.act==='cmd'){
+      tb.insertAdjacentHTML('beforeend',`<tr>
+        <td><select onchange="PLROWS[${i}].act=this.value;renderPlRows()">
+          <option>install</option><option>remove</option><option selected>cmd</option></select></td>
+        <td><select onchange="PLROWS[${i}].verb=this.value" title="指令动作">${VERBS.map(v=>`<option ${r.verb===v?'selected':''}>${v}</option>`).join('')}</select>
+          <input value="${esc(r.arg)}" oninput="PLROWS[${i}].arg=this.value" placeholder="参数（sh=脚本URL，其余留空）" style="width:55%;margin-left:6px" spellcheck="false"></td>
+        <td><span class="muted">序号</span> <input value="${esc(r.nonce)}" oninput="PLROWS[${i}].nonce=this.value" class="mono" style="width:110px" spellcheck="false">
+          <span class="muted" style="margin-left:6px">md5</span> <input value="${esc(r.md5)}" oninput="PLROWS[${i}].md5=this.value" class="mono" style="width:150px" placeholder="仅 sh 校验用" spellcheck="false"></td>
+        <td><span class="muted">一次性执行，序号防重放</span></td>
+        <td><button class="mini red" onclick="delPlRow(${i})">删</button></td></tr>`);
+      return;
+    }
+    const lb=r.pkg?labelOf(r.pkg):'';
+    tb.insertAdjacentHTML('beforeend',`<tr>
+      <td><select onchange="PLROWS[${i}].act=this.value;renderPlRows()">
+        <option ${r.act==='install'?'selected':''}>install</option>
+        <option ${r.act==='remove'?'selected':''}>remove</option>
+        <option>cmd</option></select></td>
+      <td><input value="${esc(r.pkg)}" ${r.act==='remove'?'list="rmpkgs"':''} oninput="PLROWS[${i}].pkg=this.value" placeholder="${r.act==='remove'?'点这里选我们分发过的应用':'自动读取或手填'}" spellcheck="false">${lb?`<div class="geo" style="margin-top:3px">${esc(lb)}</div>`:''}${(r.act==='remove'&&r.pkg&&rmPkgList().indexOf(r.pkg)<0)?'<div class="err" style="font-size:11px;margin-top:3px">⚠ 不在分发列表内，保存会被拒绝</div>':''}</td>
+      <td><input value="${esc(r.md5)}" oninput="PLROWS[${i}].md5=this.value" class="mono" spellcheck="false" ${r.act==='remove'?'disabled placeholder="remove 不需要"':''}></td>
+      <td><input value="${esc(r.url)}" oninput="PLROWS[${i}].url=this.value" class="mono" spellcheck="false" ${r.act==='remove'?'disabled placeholder="remove 不需要"':''}></td>
+      <td><button class="mini red" onclick="delPlRow(${i})">删</button></td></tr>`);
+  });
+  if(!PLROWS.length)tb.innerHTML='<tr><td colspan="5" class="muted">空方案（= 清空该方案下盒子的第三方应用，谨慎）。在上方选中 APK 后点「＋ 添加软件」，或点「＋ 添加指令」。</td></tr>';
+  syncRmpkgs();
+}
+/* 新增一条一次性远程指令行（序号默认当前时间戳，防重放） */
+function addPlCmd(){
+  PLROWS.push({act:'cmd',nonce:String(Math.floor(Date.now()/1000)),verb:'status',arg:'',md5:''});
+  renderPlRows();
+  const tb=document.querySelector('#t-pl tbody');
+  const last=tb.querySelector('tr:last-child');
+  if(last)last.scrollIntoView({block:'nearest'});
+}
+async function addPlRow(){
+  const f=document.getElementById('pl-apk').value;
+  if(!f){ // 没选 APK：手动加空行
+    PLROWS.push({act:'install',pkg:'',md5:'',url:''});renderPlRows();
+    msg('已加空行，可手动填（一般请先在右侧选 APK）');return;
+  }
+  const a=APKLIST.find(x=>x.file===f);if(!a)return;
+  const row={act:'install',pkg:a.pkg||'',md5:a.md5,url:apkUrl(a.file)};
+  PLROWS.push(row);renderPlRows();
+  if(a.pkg){msg('已添加 '+f+'（包名 '+a.pkg+'）');return;}
+  msg('正在从 '+f+' 里读取包名…');
+  const p=await apkPkg(a);
+  row.pkg=p;renderPlRows();
+  msg(p?('已添加并自动填入包名 '+p):('未能自动识别 '+f+' 的包名，请手动填写'),!p);
+}
+function delPlRow(i){PLROWS.splice(i,1);renderPlRows();}
+
+/* ---- 从 APK 内的 AndroidManifest.xml 自动解析包名（浏览器端，读一次即缓存到路由器） ---- */
+function apkUrl(f){return (SETTINGS.srvurl||('http://'+location.host))+'/apks/'+f;}
+function axU16(x,o){return x[o]|(x[o+1]<<8);}
+function axU32(x,o){return (x[o]+x[o+1]*256+x[o+2]*65536+x[o+3]*16777216)>>>0;}
+function parseAxmlPkg(x){
+  try{
+    let p=8, strs=null;
+    const end=Math.min(x.length, axU32(x,4)||x.length);
+    while(p+8<=end){
+      const type=axU16(x,p), hsize=axU16(x,p+2), csize=axU32(x,p+4);
+      if(!csize)break;
+      if(type===0x0001){ // RES_STRING_POOL_TYPE
+        const cnt=axU32(x,p+8), flags=axU32(x,p+16), sstart=axU32(x,p+20);
+        const base=p+sstart;
+        strs=[];
+        for(let i=0;i<cnt;i++){
+          let off=base+axU32(x,p+hsize+i*4), s='';
+          if(flags&0x100){ // UTF-8
+            let a=(x[off]&0x80)?2:1, b=(x[off+a]&0x80)?2:1; // 字符长度、字节长度各 1~2 字节
+            const bl=(x[off+a]&0x80)?((x[off+a]&0x7f)<<8)|x[off+a+1]:x[off+a];
+            s=new TextDecoder('utf-8').decode(x.subarray(off+a+b,off+a+b+bl));
+          }else{
+            let l=axU16(x,off); if(l&0x8000)l=((l&0x7fff)<<16)|axU16(x,off+2),off+=2;
+            s=new TextDecoder('utf-16le').decode(x.subarray(off+2,off+2+l*2));
+          }
+          strs.push(s);
+        }
+      }
+      if(type===0x0102&&strs){ // 第一个 START_ELEMENT = <manifest>
+        const hsz=hsize, aStart=axU16(x,p+hsz+8), aSize=axU16(x,p+hsz+10), aCnt=axU16(x,p+hsz+12);
+        const ap=p+hsz+aStart;
+        for(let i=0;i<aCnt;i++){
+          const o=ap+i*aSize;
+          if(strs[axU32(x,o+4)]==='package'){
+            const raw=axU32(x,o+8), dt=x[o+8+12+3], dat=axU32(x,o+8+16);
+            const v=raw!==0xffffffff?strs[raw]:(dt===3?strs[dat]:'');
+            if(v)return v;
+          }
+        }
+        return '';
+      }
+      p+=csize;
+    }
+  }catch(e){}
+  return '';
+}
+async function apkPkg(a){
+  try{
+    const r=await fetch('apks/'+encodeURIComponent(a.file),{headers:{'Range':'bytes=0-524287'}});
+    const buf=new Uint8Array(await r.arrayBuffer());
+    let xml=null;
+    for(let i=0;i<buf.length-30;i++){
+      if(buf[i]===0x50&&buf[i+1]===0x4b&&buf[i+2]===3&&buf[i+3]===4){ // 本地文件头
+        const nlen=axU16(buf,i+26), elen=axU16(buf,i+28);
+        let nm='';for(let j=0;j<nlen;j++)nm+=String.fromCharCode(buf[i+30+j]);
+        if(nm!=='AndroidManifest.xml')continue;
+        const method=axU16(buf,i+8), csz=axU32(buf,i+18);
+        const ds=i+30+nlen+elen;
+        if(method===0){xml=buf.subarray(ds,ds+(csz||buf.length-ds));break;}
+        try{ // deflate：流式解压，中途出错也保留已解出的部分
+          const st=new Blob([buf.slice(ds)]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+          const rd=st.getReader();const parts=[];
+          while(true){try{const{done,value}=await rd.read();if(done)break;parts.push(value);}catch(e){break;}}
+          xml=new Uint8Array(parts.reduce((n,c)=>n+c.length,0));
+          let o=0;for(const c of parts){xml.set(c,o);o+=c.length;}
+        }catch(e){}
+        break;
+      }
+    }
+    if(!xml)return '';
+    const pkg=parseAxmlPkg(xml);
+    if(pkg&&!a.pkg){a.pkg=pkg;api('set_pkg',{name:a.file},pkg);} // 缓存到路由器
+    return pkg;
+  }catch(e){return '';}
+}
+async function newPlan(){
+  const n=document.getElementById('pl-new').value.trim();
+  if(!/^[A-Za-z0-9_-]{1,32}$/.test(n)){msg('方案名只能用字母数字_-',true);return;}
+  if(!PLANS.includes(n))PLANS.push(n);
+  const s=document.getElementById('pl-name');
+  s.innerHTML=PLANS.map(p=>`<option>${esc(p)}</option>`).join('');
+  s.value=n;
+  PLROWS=[];document.getElementById('pl-head').value='# 方案 '+n;renderPlRows();
+}
+async function savePlan(){
+  const n=document.getElementById('pl-name').value;if(!n){msg('先选择或新建方案',true);return;}
+  const VERBS=['report','reboot','memclean','clearcache','dns','wifi','oem','maint','status','sh'];
+  for(const r of PLROWS){
+    if(r.act==='cmd'){
+      if(VERBS.indexOf(r.verb)<0){msg('未知指令动作：'+r.verb,true);return;}
+      if(r.verb==='sh'&&!/^https?:\/\/.+/.test(r.arg||'')){msg('sh 指令必须填 http(s):// 开头的脚本 URL',true);return;}
+      if(!/^\d{1,12}$/.test(String(r.nonce||''))){msg('指令序号必须是纯数字（时间戳）',true);return;}
+      continue;
+    }
+    if(r.pkg&&!/^[A-Za-z0-9._-]+$/.test(r.pkg)){msg('包名含非法字符：'+r.pkg,true);return;}
+    if(r.act==='install'&&r.pkg&&(!r.md5||!r.url)){msg(r.pkg+' 缺少 md5 或 URL',true);return;}
+  }
+  const head=document.getElementById('pl-head').value.split('\n').filter(l=>l.trim().startsWith('#')).join('\n');
+  const body=PLROWS.map(r=>r.act==='cmd'
+      ? ['cmd',r.nonce,r.verb,String(r.arg||'').replace(/\|/g,''),r.md5||''].join('|')
+      : (r.pkg?[r.act,r.pkg,r.md5,r.url].join('|'):null)
+    ).filter(Boolean).join('\n');
+  const txt=(head?head+'\n':'')+(body||'# （空方案）');
+  const b=document.getElementById('pl-save');b.disabled=true;
+  const r=await api('save_plan',{name:n},txt);
+  b.disabled=false;msg(r.ok?'方案 '+n+' 已保存':'保存失败：'+(r.err||''),!r.ok);
+}
+
+/* ---- APK 库 ---- */
+async function loadApks(){
+  const d=await api('apks');APKLIST=d.apks||[];
+  const tb=document.querySelector('#t-ap tbody');tb.innerHTML='';
+  APKLIST.forEach((a,i)=>{
+    const lb=a.label||DEFAULT_LABELS[a.pkg]||'';
+    tb.insertAdjacentHTML('beforeend',`<tr>
+      <td class="mono">${esc(a.file)}</td>
+      <td>${lb?esc(lb):'<span class="muted">未设置</span>'} <button class="mini" onclick="setLabel(${i})">${lb?'改':'＋ 设中文名'}</button></td>
+      <td class="mono" style="font-size:11px">${a.pkg?esc(a.pkg):'<button class="mini" onclick="readPkg('+i+')">识别包名</button>'}</td>
+      <td>${(a.size/1048576).toFixed(1)}MB</td>
+      <td class="mono" style="font-size:11px">${esc(a.md5)}</td>
+      <td>
+        <button class="mini" onclick="cpLine(${i})">复制 install 行</button>
+        <a class="mini" style="text-decoration:none;display:inline-block" href="apks/${encodeURIComponent(a.file)}" download>下载</a>
+        <button class="mini" onclick="renameApk(${i})">改名</button>
+        <button class="mini red" onclick="deleteApk(${i})">删除</button>
+      </td></tr>`);
+  });
+  if(!APKLIST.length)tb.innerHTML='<tr><td colspan="6" class="muted">还没有 APK，点上面「上传 APK」。</td></tr>';
+}
+async function setLabel(i){
+  const a=APKLIST[i];
+  const cur=a.label||DEFAULT_LABELS[a.pkg]||'';
+  const v=prompt('给 '+a.file+'（'+(a.pkg||'包名未识别')+'）起个中文名，方案编辑和收发记录里都会显示：',cur);
+  if(v===null)return;
+  const r=await api('set_label',{name:a.file},v.trim());
+  if(r.ok){msg('中文名已保存：'+(r.label||'（已清空）'));loadApks();syncRmpkgs();}else msg(r.err||'失败',true);
+}
+async function readPkg(i){
+  const a=APKLIST[i];
+  msg('正在从 '+a.file+' 读取包名…');
+  const p=await apkPkg(a);
+  if(p){msg('包名：'+p);loadApks();}else msg('未能识别 '+a.file+' 的包名',true);
+}
+async function cpLine(i){
+  const a=APKLIST[i];
+  let p=a.pkg||await apkPkg(a);
+  const line='install|'+(p||'包名待填')+'|'+a.md5+'|'+apkUrl(a.file);
+  navigator.clipboard.writeText(line).then(()=>msg(p?('已复制（含包名 '+p+'）'):'已复制，请把「包名待填」改成真实包名'));
+}
+function saneName(n){return n.replace(/[^A-Za-z0-9._-]/g,'_');}
+async function uploadApks(files){
+  for(const f of files){
+    if(!/\.apk$/i.test(f.name)){msg(f.name+' 不是 .apk，跳过',true);continue;}
+    let name=saneName(f.name);
+    if(!/\.apk$/.test(name))name=name+'.apk';
+    const r=await fetch(API+'?op=upload&name='+encodeURIComponent(name),
+      {method:'POST',headers:{'X-Auth-Token':TOKEN},body:f});
+    const j=await r.json().catch(()=>({ok:0,err:'HTTP '+r.status}));
+    msg(j.ok?('已上传 '+name):('上传失败 '+name+'：'+(j.err||'')),!j.ok);
+  }
+  loadApks();
+}
+async function renameApk(i){
+  const old=APKLIST[i].file;
+  const t=prompt('新文件名（.apk 结尾）：',old);
+  if(t===null||t===old)return;
+  const nt=saneName(t);
+  if(!/\.apk$/.test(nt)){msg('必须以 .apk 结尾',true);return;}
+  const r=await api('rename_apk',{from:old,to:nt});
+  if(r.ok){msg('已改名');loadApks();}else msg(r.err||'失败',true);
+}
+async function deleteApk(i){
+  const f=APKLIST[i].file;
+  if(!confirm('确定删除 '+f+' ？（已在方案里引用的话，盒子将无法下载到该包）'))return;
+  const r=await api('delete_apk',{name:f});
+  if(r.ok){msg('已删除 '+f);loadApks();}else msg(r.err||'失败',true);
+}
+
+/* ---- 远程指令 ---- */
+async function loadCmdPanel(){
+  const d=await api('dashboard');
+  if(d.ok){PLANS=d.plans||[];}
+  const s=document.getElementById('cm-plan');
+  const cur=s.value;
+  s.innerHTML=PLANS.map(p=>`<option>${esc(p)}</option>`).join('')||'<option value=""></option>';
+  if(PLANS.includes(cur))s.value=cur;
+  cmdVerbChange();
+  loadCmds();
+}
+function cmdVerbChange(){
+  const v=document.getElementById('cm-verb').value;
+  document.getElementById('cm-sh').classList.toggle('hidden',v!=='sh');
+}
+async function sendCmd(){
+  const plan=document.getElementById('cm-plan').value;
+  const verb=document.getElementById('cm-verb').value;
+  if(!plan){msg('先创建一个方案',true);return;}
+  let body='';
+  if(verb==='sh'){
+    const u=document.getElementById('cm-url').value.trim();
+    const m=document.getElementById('cm-md5').value.trim();
+    if(!/^https?:\/\/.+/.test(u)){msg('请填写脚本 URL',true);return;}
+    body=u+'\n'+m;
+  }
+  if(verb==='reboot'&&!confirm('确定让「'+plan+'」方案下的所有盒子立即重启？'))return;
+  const b=document.getElementById('cm-send');b.disabled=true;
+  const r=await api('send_cmd',{plan:plan,verb:verb},body);
+  b.disabled=false;
+  msg(r.ok?('已下发 '+verb+'（序号 '+r.nonce+'），盒子下一轮执行'):('下发失败：'+(r.err||'')),!r.ok);
+  if(r.ok)loadCmds();
+}
+async function loadCmds(){
+  // 并行拉：回执(cmds.log) + 下发记录(audit.log send_cmd) + 方案/盒子/APK库
+  const [rc,ra,rapk,rd]=await Promise.all([api('cmds'),api('audit'),api('apks'),api('dashboard')]);
+  if(rapk.ok)APKLIST=rapk.apks||[];
+  if(rd.ok){PLANS=rd.plans||PLANS||[];UNKIDS=mergeByMac(rd.unknown||[]);}
+
+  /* 回执行：时间|盒子身份|<序号>[:动作][:结果]
+     老格式无分隔符（如 1790133502statusok）→ 按已知动作表切分出 verb 和 result */
+  const VERBS=['report','reboot','memclean','clearcache','dns','wifi','oem','maint','status','sh'];
+  const rec=[];
+  (rc.text||'').split('\n').forEach(l=>{
+    l=l.trim();if(!l)return;
+    const p=l.split('|');if(p.length<3)return;
+    const m=String(p[2]||'').match(/^(\d+):?([a-z]+):?(.*)$/i);
+    if(!m)return;
+    let verb=(m[2]||'').toLowerCase(), res=(m[3]||'').replace(/;+$/,'');
+    if(res===''){for(const v of VERBS){if(verb.startsWith(v)&&verb.length>v.length){res=verb.slice(v.length);verb=v;break;}}}
+    rec.push({t:p[0],id:p[1],nonce:m[1],verb:verb,res:res});
+  });
+  /* 下发行：时间|admin|send_cmd|方案|动作|序号 */
+  const sent=[];
+  (ra.text||'').split('\n').forEach(l=>{
+    l=l.trim();if(!l)return;
+    const p=l.split('|');
+    if(p[1]==='admin'&&p[2]==='send_cmd'&&p[5])sent.push({t:p[0],plan:p[3],verb:p[4],nonce:p[5]});
+  });
+  const byNonce={};
+  sent.forEach(s=>{byNonce[s.nonce]=s;});
+
+  const shortId=id=>String(id||'').length>16?(String(id).slice(0,6)+'…'+String(id).slice(-4)):String(id||'');
+  const resChip=res=>res==='ok'?'<span class="okm">ok</span>':(res?'<span class="err">'+esc(res)+'</span>':'<span class="muted">待回执</span>');
+
+  /* 对照表：每条下发 → 该方案下盒子的回执（按 nonce 匹配） */
+  const tb=document.querySelector('#t-cmd tbody');tb.innerHTML='';
+  const rows=[];
+  sent.slice().reverse().forEach(s=>rows.push({...s,recs:rec.filter(x=>x.nonce===s.nonce)}));
+  if(!rows.length&&!rec.length){
+    tb.innerHTML='<tr><td colspan="6" class="muted">还没有下发过指令。用上面的「下发远程指令」，或在软件方案里加 cmd 行。</td></tr>';
+  }
+  rows.forEach(r=>{
+    const st=r.recs.length
+      ? (r.recs.every(x=>x.res==='ok')?'<span class="okm">已执行</span>':'<span class="err">部分/异常</span>')
+      : '<span class="muted">待回执</span>';
+    const detail=r.recs.length
+      ? r.recs.map(x=>`<div>${resChip(x.res)} <span class="mono small" title="${esc(x.id)}">${esc(shortId(x.id))}</span> <span class="muted small">${esc(x.t)}</span></div>`).join('')
+      : '<span class="muted">盒子下一轮拉清单（≤10 分钟）后执行</span>';
+    tb.insertAdjacentHTML('beforeend',`<tr>
+      <td class="small">${esc(r.t)}</td><td><span class="badge">${esc(r.plan)}</span></td>
+      <td class="mono">${esc(r.verb)}</td><td class="mono small">${esc(r.nonce)}</td>
+      <td>${st}</td><td>${detail}</td></tr>`);
+  });
+  /* 没有对应下发记录的老回执（历史遗留），单独补在最后 */
+  const leftover={};
+  rec.forEach(x=>{if(!byNonce[x.nonce]){(leftover[x.nonce]=leftover[x.nonce]||{nonce:x.nonce,verb:x.verb,recs:[]}).recs.push(x);}});
+  Object.keys(leftover).forEach(n=>{
+    const r=leftover[n];
+    tb.insertAdjacentHTML('beforeend',`<tr>
+      <td class="small muted">${esc(r.recs[0].t)}</td><td class="muted">—</td>
+      <td class="mono">${esc(r.verb)}</td><td class="mono small">${esc(n)}</td>
+      <td>${r.recs.every(x=>x.res==='ok')?'<span class="okm">已执行</span>':'<span class="err">见明细</span>'}</td>
+      <td>${r.recs.map(x=>`<div>${resChip(x.res)} <span class="mono small" title="${esc(x.id)}">${esc(shortId(x.id))}</span> <span class="muted small">${esc(x.t)}</span></div>`).join('')}</td></tr>`);
+  });
+
+  /* 未收录应用：各登记盒子的心跳应用清单 ∖ APK 库包名 */
+  const tu=document.querySelector('#t-unc tbody');tu.innerHTML='';
+  let n=0;
+  if(rd.ok){
+    const known={};(APKLIST||[]).forEach(a=>{if(a.pkg)known[a.pkg]=1;});
+    const map={};
+    (rd.devices||[]).forEach(d=>{
+      String(d.ta||'').split(',').forEach(p=>{
+        p=p.trim();if(!p||known[p])return;
+        if(!map[p])map[p]={boxes:[]};
+        map[p].boxes.push(d);
+      });
+    });
+    const keys=Object.keys(map).sort();
+    n=keys.length;
+    keys.forEach(p=>{
+      const bs=map[p].boxes;
+      const names=bs.map(d=>d.note||shortId(d.id)).join('、');
+      tu.insertAdjacentHTML('beforeend',`<tr>
+        <td class="mono small">${esc(p)}</td>
+        <td>${labelOf(p)?esc(labelOf(p)):'<span class="muted">未设置</span>'}</td>
+        <td class="small">${bs.length} 台：${esc(names)}</td></tr>`);
+    });
+  }
+  if(!n)tu.innerHTML='<tr><td colspan="3" class="muted">没有未收录的应用（或盒子还没上报过应用清单）。</td></tr>';
+  document.getElementById('unc-n').textContent=n?('共 '+n+' 个'):'';
+
+  /* 下发卡片的目标方案下拉 */
+  const s=document.getElementById('cm-plan');
+  const cur=s.value;
+  s.innerHTML=(PLANS||[]).map(p=>`<option>${esc(p)}</option>`).join('')||'<option value=""></option>';
+  if((PLANS||[]).includes(cur))s.value=cur;
+}
+
+/* ---- 客户分布（结构化：每盒最新一条 + ipcache 归属地/运营商） ---- */
+async function loadGeo(){
+  const d=await api('geo');
+  const tb=document.querySelector('#t-geo tbody');tb.innerHTML='';
+  if(!d.ok){tb.innerHTML='<tr><td colspan="8" class="muted">加载失败</td></tr>';return;}
+  const rows=(d.rows||[]).slice().sort((a,b)=>{          // 客户（公网）排前面，再按最后在线倒序
+    const pa=a.geo==='内网/本机'?1:0, pb=b.geo==='内网/本机'?1:0;
+    if(pa!==pb)return pa-pb;
+    return String(b.t||'').localeCompare(String(a.t||''));
+  });
+  const pub=rows.filter(x=>x.geo!=='内网/本机');
+  document.getElementById('g-n').textContent=rows.length;
+  document.getElementById('g-c').textContent=pub.length;
+  document.getElementById('g-l').textContent=rows.length-pub.length;
+  const byGeo={};
+  rows.forEach(x=>{const g=x.geo||'未知';byGeo[g]=(byGeo[g]||0)+1;});
+  document.getElementById('g-sum').textContent='归属地：'+Object.keys(byGeo).sort((a,b)=>byGeo[b]-byGeo[a])
+    .map(g=>g+' ×'+byGeo[g]).join('，');
+  rows.forEach(x=>{
+    const who=x.note&&x.note!=='-'?x.note:'';
+    tb.insertAdjacentHTML('beforeend',`<tr>
+      <td>${who?esc(who)+'<br>':'<span class="muted">未备注</span>'}<span class="mono small" title="${esc(x.id)}">${esc(x.id&&x.id!=='-'?x.id:x.ip)}</span></td>
+      <td><span class="badge">${esc(x.plan)||'-'}</span></td>
+      <td class="small">${esc(x.t)||'-'}</td>
+      <td class="mono small">${esc(x.ip)}</td>
+      <td>${x.geo==='内网/本机'?'<span class="muted">'+esc(x.geo)+'</span>':esc(x.geo)}</td>
+      <td class="small">${esc(x.isp)||'-'}</td>
+      <td class="mono small">${esc(x.model)||'-'}</td><td>${sdkTxt(x.sdk)}</td></tr>`);
+  });
+  const r=await api('georaw');
+  document.getElementById('geoview').textContent=r.text||'（空）';
+}
+
+/* ---- 系统设置 ---- */
+async function loadSettings(){
+  const [a,b]=await Promise.all([api('get_settings'),api('sysinfo')]);
+  if(a.ok){
+    SETTINGS=a;
+    document.getElementById('st-srvurl').value=a.srvurl||'';
+    document.getElementById('st-srcnet').value=a.srcnet||'';
+    document.getElementById('st-online').value=a.online_h||'24';
+    document.getElementById('st-apks').value=a.apks_dir||'/srv/tvupd/apks';
+  }
+  const tb=document.querySelector('#t-sys tbody');tb.innerHTML='';
+  if(b.ok){
+    const rows=[
+      ['路由器型号',b.model||'-'],['系统',b.os||'-'],['内核',b.kernel||'-'],
+      ['已运行',b.up||'-'],['内存',b.mem_avail?('可用 '+b.mem_avail+'MB / 共 '+b.mem_total+'MB'):'-'],
+      ['LAN 地址',b.lan_ip||'-'],['服务端口',b.port||'-'],['数据盘(/srv)',b.disk||'-'],
+      ['登记盒子',b.devices+' 台'],['APK 库',b.apks+' 个'],['方案数',b.plans+' 个']
+    ];
+    rows.forEach(r=>tb.insertAdjacentHTML('beforeend',
+      `<tr><th style="width:22%">${esc(r[0])}</th><td class="mono small">${esc(r[1])}</td></tr>`));
+  }
+}
+async function saveSettings(){
+  const u=document.getElementById('st-srvurl').value.trim();
+  const n=document.getElementById('st-srcnet').value.trim();
+  const h=document.getElementById('st-online').value.trim();
+  const a=document.getElementById('st-apks').value.trim();
+  const oldApks=SETTINGS.apks_dir||'';
+  const body=[u,n,h,a].join('\n');
+  const r=await api('save_settings',{},body);
+  if(r.ok){
+    msg(a&&a!==oldApks?('设置已保存，APK 已迁移到 '+a):'设置已保存');
+    loadSettings();loadApks();
+  }else msg(r.err||'保存失败',true);
+}
+async function setPwd(){
+  const p1=document.getElementById('st-pwd1').value.trim();
+  const p2=document.getElementById('st-pwd2').value.trim();
+  if(p1!==p2){msg('两次输入不一致',true);return;}
+  if(!/^[A-Za-z0-9]{6,32}$/.test(p1)){msg('密码须为 6-32 位字母数字',true);return;}
+  if(!confirm('确定修改管理密码？改完需要用新密码重新登录。'))return;
+  const r=await api('set_pwd',{},p1);
+  if(r.ok){TOKEN=p1;localStorage.setItem('tvupd_token',p1);document.getElementById('st-pwd1').value='';document.getElementById('st-pwd2').value='';msg('密码已修改，本浏览器已换用新密码');}
+  else msg(r.err||'修改失败',true);
+}
+
+/* 启动 */
+if(TOKEN){api('dashboard').then(d=>{if(d.ok)enter();else document.getElementById('lerr').textContent='密码已失效，请重新输入';});}
+document.getElementById('pwd').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
+setInterval(()=>{if(CURV==='ov'&&!document.getElementById('app').classList.contains('hidden'))refresh();},60000);
+</script>
+</body>
+</html>

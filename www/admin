@@ -1,0 +1,484 @@
+#!/bin/sh
+# admin —— 管理控制台 CGI v2（仅限局域网访问，需令牌）
+# op=dashboard | get_devices | save_devices | save_note | get_plan | save_plan
+#   | apks | upload | delete_apk | rename_apk | geo | logtail
+PRIV=/srv/tvupd-priv
+
+# ---- 系统设置（$PRIV/settings.env，KEY=VALUE；缺省值见下，可被覆盖）----
+# SRVURL   对外服务地址（生成 install 行 / APK 下载链接用）
+# SRCNET   管理接口来源白名单网段前缀（如 192.168.1.）
+# ONLINE_H 在线判定窗口（小时）
+# APKS_DIR APK 库存放目录（默认 /srv/tvupd/apks；改动会自动迁移并做软链保证下载链接不变）
+SRVURL_DEF="http://your.domain:8083"
+SRCNET_DEF="192.168.1."
+ONLINE_H_DEF="24"
+APKS_DEF="/srv/tvupd/apks"
+SRVURL="$SRVURL_DEF"; SRCNET="$SRCNET_DEF"; ONLINE_H="$ONLINE_H_DEF"; APKS_DIR="$APKS_DEF"
+[ -s "$PRIV/settings.env" ] && . "$PRIV/settings.env" 2>/dev/null
+# 防脏数据：SRCNET 只能是数字加点且以点结尾
+case "$SRCNET" in *[!0-9.]*|"") SRCNET="$SRCNET_DEF" ;; esac
+case "$SRCNET" in *.) ;; *) SRCNET="${SRCNET}." ;; esac
+case "$ONLINE_H" in *[!0-9]*|"") ONLINE_H="24" ;; esac
+# APK 目录：绝对路径、禁止 ..
+APKS_DIR=$(printf '%s' "$APKS_DIR" | tr -cd '/A-Za-z0-9._-' | sed 's|/*$||')
+case "$APKS_DIR" in /*..*|*..*|"") APKS_DIR="$APKS_DEF" ;; esac
+APKS="$APKS_DIR"
+
+# ---- 来源限制：管理接口只允许局域网网段 ----
+SRCIP=$(printf '%s' "$REMOTE_ADDR" | tr -cd '0-9.')
+case "$SRCIP" in
+    $SRCNET*) ;;
+    *)
+        printf 'Status: 403\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{"ok":0,"err":"仅限局域网访问"}\r\n'
+        exit 0
+        ;;
+esac
+
+# ---- 输出 JSON 错误并退出 ----
+fail() {
+    printf 'Status: 401\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{"ok":0,"err":"%s"}\r\n' "$1"
+    exit 0
+}
+
+# ---- 令牌校验（放 header，避免进访问日志）----
+TOKEN=$(printf '%s' "$HTTP_X_AUTH_TOKEN" | tr -cd 'a-zA-Z0-9')
+REAL=$(head -n1 "$PRIV/admin.pwd" 2>/dev/null | tr -cd 'a-zA-Z0-9')
+[ -n "$REAL" ] || fail "未设置管理密码"
+[ "$TOKEN" = "$REAL" ] || fail "密码错误"
+
+QS="$QUERY_STRING"
+qget() { printf '%s' "$QS" | sed -n "s/.*$1=\([A-Za-z0-9._-]\{1,80\}\).*/\1/p"; }
+OP=$(qget op)
+NAME=$(qget name)
+
+json_str() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g;s/"/\\"/g')"; }
+
+# ---- 读取 POST body：小 body 直接读，大 body（上传）落临时文件 ----
+CL=$(printf '%s' "$CONTENT_LENGTH" | tr -cd '0-9')
+BODY=""
+IN_TMP=""
+if [ -n "$CL" ] && [ "$CL" -gt 0 ]; then
+    if [ "$OP" = "upload" ]; then
+        IN_TMP=/tmp/admup.$$
+        cat > "$IN_TMP"
+    elif [ "$CL" -le 524288 ]; then
+        BODY=$(head -c "$CL")
+    fi
+fi
+
+# ---- IP 归属地（只查缓存，不发网络请求；缓存由 geo-lookup.sh 维护）----
+geo_of() {
+    case "$1" in
+        192.168.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|127.*|"") echo "内网" ;;
+        *)
+            if [ -s "$PRIV/ipcache/$1" ]; then sed -n 1p "$PRIV/ipcache/$1"; else echo ""; fi
+        ;;
+    esac
+}
+
+case "$OP" in
+
+dashboard)
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n'
+    NOWE=$(date +%s)
+    CUT=$(date -d "@$((NOWE - ONLINE_H * 3600))" '+%Y-%m-%d %H:%M' 2>/dev/null)
+    NOW=$(date '+%Y-%m-%d %H:%M:%S')
+    # 归属地报告 5 分钟内没刷过就在后台刷一次（不阻塞响应）
+    if [ -z "$(find "$PRIV/locations.txt" -mmin -5 2>/dev/null)" ]; then
+        sh "$PRIV/geo-lookup.sh" >/dev/null 2>&1 &
+    fi
+    echo '{'
+    echo "\"ok\":1,\"now\":$(json_str "$NOW"),"
+    echo '"devices":['
+    FIRST=1
+    grep -E '^[A-Za-z0-9_-]+\|' "$PRIV/devices.txt" 2>/dev/null | while IFS='|' read -r ID PLAN NOTE; do
+        [ -n "$ID" ] || continue
+        KL=$(printf '%s' "$ID" | tr 'a-z' 'A-Z')
+        L=$(awk -F'|' -v k="$KL" 'toupper($2)==k || toupper($3)==k' "$PRIV/access.log" 2>/dev/null | tail -n 1)
+        LT=""; LIP=""; LSDK=""; LMD=""; ON="false"; GEO=""; LUP=""; LMEM=""; LTN=""; LTA=""; LMAC=""
+        if [ -n "$L" ]; then
+            LT=$(printf '%s' "$L" | cut -d'|' -f1)
+            LIP=$(printf '%s' "$L" | cut -d'|' -f4)
+            LMAC=$(printf '%s' "$L" | cut -d'|' -f3)
+            LSDK=$(printf '%s' "$L" | cut -d'|' -f5)
+            LMD=$(printf '%s' "$L" | cut -d'|' -f6)
+            LUP=$(printf '%s' "$L" | cut -d'|' -f9)
+            LMEM=$(printf '%s' "$L" | cut -d'|' -f10)
+            LTN=$(printf '%s' "$L" | cut -d'|' -f11)
+            LTA=$(printf '%s' "$L" | cut -d'|' -f12)
+            [ "$LUP" = "-" ] && LUP=""
+            [ "$LMEM" = "-" ] && LMEM=""
+            [ "$LTN" = "-" ] && LTN=""
+            if [ -n "$CUT" ]; then [ "$LT" \> "$CUT" ] && ON="true"; fi
+            GEO=$(geo_of "$LIP")
+        fi
+        # 最近一条远程指令回执
+        LC=$(awk -F'|' -v k="$KL" 'toupper($2)==k' "$PRIV/cmds.log" 2>/dev/null | tail -n 1)
+        LCMD=""
+        [ -n "$LC" ] && LCMD=$(printf '%s' "$LC" | cut -d'|' -f3 | cut -c 1-160)
+        [ "$FIRST" = "1" ] || echo ','
+        FIRST=0
+        printf '{"id":%s,"plan":%s,"note":%s,"last_time":%s,"ip":%s,"geo":%s,"sdk":%s,"model":%s,"online":%s,"up":%s,"mem":%s,"tn":%s,"ta":%s,"cmd":%s,"mac":%s}' \
+            "$(json_str "$ID")" "$(json_str "$PLAN")" "$(json_str "$NOTE")" \
+            "$(json_str "$LT")" "$(json_str "$LIP")" "$(json_str "$GEO")" \
+            "$(json_str "$LSDK")" "$(json_str "$LMD")" "$ON" \
+            "$(json_str "$LUP")" "$(json_str "$LMEM")" "$(json_str "$LTN")" \
+            "$(json_str "$LTA")" "$(json_str "$LCMD")" "$(json_str "$LMAC")"
+    done
+    echo '],'
+    echo '"unknown":['
+    # 身份过短（<8 字符）的多半是手工测试残留，不进未登记列表
+    cut -d'|' -f2 "$PRIV/access.log" 2>/dev/null | grep . | awk 'length($0)>=8' | sort -u | while read -r UID2; do
+        KL=$(printf '%s' "$UID2" | tr 'a-z' 'A-Z')
+        awk -F'|' -v k="$KL" 'toupper($1)==k' "$PRIV/devices.txt" 2>/dev/null | grep -q . && continue
+        L=$(awk -F'|' -v k="$KL" 'toupper($2)==k || toupper($3)==k' "$PRIV/access.log" | tail -n 1)
+        UIP=$(printf '%s' "$L" | cut -d'|' -f4)
+        LT=$(printf '%s' "$L" | cut -d'|' -f1)
+        LMAC=$(printf '%s' "$L" | cut -d'|' -f3)
+        ON="false"
+        [ -n "$CUT" ] && [ "$LT" \> "$CUT" ] && ON="true"
+        printf '{"id":%s,"last_time":%s,"ip":%s,"geo":%s,"sdk":%s,"model":%s,"mac":%s,"online":%s},' \
+            "$(json_str "$UID2")" "$(json_str "$LT")" \
+            "$(json_str "$UIP")" "$(json_str "$(geo_of "$UIP")")" \
+            "$(json_str "$(printf '%s' "$L" | cut -d'|' -f5)")" \
+            "$(json_str "$(printf '%s' "$L" | cut -d'|' -f6)")" \
+            "$(json_str "$LMAC")" "$ON"
+    done | sed 's/,$//'
+    echo '],'
+    echo '"plans":['
+    ls "$PRIV/plans" 2>/dev/null | grep -v '\.bak$' | sed 's/\.txt$//' | while read -r P; do printf '"%s",' "$P"; done | sed 's/,$//'
+    echo '],'
+    echo "\"devices_count\":$(grep -cE '^[A-Za-z0-9_-]+\|' "$PRIV/devices.txt" 2>/dev/null || echo 0)"
+    echo '}'
+    ;;
+
+get_devices)
+    printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
+    cat "$PRIV/devices.txt"
+    ;;
+
+save_devices)
+    if printf '%s' "$BODY" | grep . | grep -qvE '^#|^[A-Za-z0-9_-]+\|[A-Za-z0-9_-]+\|?[^|]*$'; then
+        printf 'Status: 400\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{"ok":0,"err":"格式错误：每行应为 身份|方案|备注，身份和方案只能用字母数字_-"}\r\n'
+        exit 0
+    fi
+    cp "$PRIV/devices.txt" "$PRIV/devices.txt.bak" 2>/dev/null
+    printf '%s\n' "$BODY" > "$PRIV/devices.txt.tmp" && mv "$PRIV/devices.txt.tmp" "$PRIV/devices.txt"
+    echo "$(date '+%F %T')|admin|save_devices" >> "$PRIV/audit.log"
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1}'
+    ;;
+
+save_note)
+    ID=$(qget id)
+    [ -n "$ID" ] || fail "缺少 id"
+    NOTE=$(printf '%s' "$BODY" | tr -d '\r\n' | head -c 180)
+    KL=$(printf '%s' "$ID" | tr 'a-z' 'A-Z')
+    cp "$PRIV/devices.txt" "$PRIV/devices.txt.bak" 2>/dev/null
+    TMP=$PRIV/devices.txt.tmp
+    : > "$TMP"
+    MATCH=0
+    while IFS= read -r LINE; do
+        [ -n "$LINE" ] || { printf '\n' >> "$TMP"; continue; }
+        C1=$(printf '%s' "$LINE" | cut -d'|' -f1)
+        C1K=$(printf '%s' "$C1" | tr 'a-z' 'A-Z')
+        if [ "$C1K" = "$KL" ]; then
+            PLAN=$(printf '%s' "$LINE" | cut -d'|' -f2)
+            printf '%s|%s|%s\n' "$C1" "$PLAN" "$NOTE" >> "$TMP"
+            MATCH=1
+        else
+            printf '%s\n' "$LINE" >> "$TMP"
+        fi
+    done < "$PRIV/devices.txt"
+    if [ "$MATCH" = "1" ]; then
+        mv "$TMP" "$PRIV/devices.txt"
+        echo "$(date '+%F %T')|admin|save_note|$ID" >> "$PRIV/audit.log"
+        printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1}'
+    else
+        rm -f "$TMP"
+        fail "档案表中找不到该身份"
+    fi
+    ;;
+
+get_plan)
+    [ -n "$NAME" ] || fail "缺少方案名"
+    printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
+    cat "$PRIV/plans/$NAME.txt" 2>/dev/null || echo "# 新方案 $NAME"
+    ;;
+
+save_plan)
+    [ -n "$NAME" ] || fail "缺少方案名"
+    # ---- 白名单约束：remove 只能删「我们分发过的应用」，防止误删用户自装应用 ----
+    # 允许的删除范围 = 本方案 install 行的包名 ∪ APK 库登记过的包名（apks/.pkgs/*）
+    printf '%s\n' "$BODY" | grep -E '^remove\|' | cut -d'|' -f2 | grep . | while read -r PKG; do
+        case "$PKG" in *[!A-Za-z0-9._-]*|"") continue ;; esac
+        OK=0
+        # 本方案 install 列表
+        for L2 in $(printf '%s\n' "$BODY" | grep -E '^install\|' | cut -d'|' -f2); do
+            [ "$L2" = "$PKG" ] && OK=1
+        done
+        # APK 库历史上登记过的包名（换方案/清理旧应用也允许）
+        if [ "$OK" = "0" ] && ls "$APKS"/.pkgs/* >/dev/null 2>&1; then
+            for L2 in $(cat "$APKS"/.pkgs/* 2>/dev/null); do
+                [ "$L2" = "$PKG" ] && OK=1
+            done
+        fi
+        [ "$OK" = "1" ] || echo "$PKG"
+    done > /tmp/rmvchk.$$
+    if [ -s /tmp/rmvchk.$$ ]; then
+        V=$(tr '\n' ' ' < /tmp/rmvchk.$$ | sed 's/ *$//' | cut -c 1-200)
+        rm -f /tmp/rmvchk.$$
+        printf 'Status: 400\r\nContent-Type: application/json; charset=utf-8\r\n\r\n{"ok":0,"err":"这些包不在我们分发的应用里，不允许 remove（保护用户自装应用）：%s。若确要删除，先把对应 APK 上传到 APK 库。"}\r\n' "$V"
+        exit 0
+    fi
+    rm -f /tmp/rmvchk.$$
+    cp "$PRIV/plans/$NAME.txt" "$PRIV/plans/$NAME.txt.bak" 2>/dev/null
+    printf '%s\n' "$BODY" > "$PRIV/plans/$NAME.txt.tmp" && mv "$PRIV/plans/$NAME.txt.tmp" "$PRIV/plans/$NAME.txt"
+    echo "$(date '+%F %T')|admin|save_plan|$NAME" >> "$PRIV/audit.log"
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1}'
+    ;;
+
+apks)
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1,"apks":['
+    ls "$APKS" 2>/dev/null | grep '\.apk$' | while read -r F; do
+        M=$(md5sum "$APKS/$F" | cut -d' ' -f1)
+        S=$(wc -c < "$APKS/$F")
+        PKG=""; [ -s "$APKS/.pkgs/$F" ] && PKG=$(head -c 200 "$APKS/.pkgs/$F" | tr -cd 'A-Za-z0-9._-')
+        LBL=""; [ -s "$APKS/.labels/$F" ] && LBL=$(head -c 80 "$APKS/.labels/$F" | tr -d '\r\n|\\')
+        printf '{"file":%s,"md5":%s,"size":%s,"pkg":%s,"label":%s,"line":"install|包名待填|%s|%s/apks/%s"},' \
+            "$(json_str "$F")" "$(json_str "$M")" "$S" "$(json_str "$PKG")" "$(json_str "$LBL")" "$M" "$SRVURL" "$F"
+    done | sed 's/,$//'
+    echo ']}'
+    ;;
+
+set_label)
+    # 设置 APK 的中文名：name=<apk文件名>，body=中文名（删除即清空）
+    F=$(qget name)
+    case "$F" in *.apk) ;; *) fail "文件名不合法" ;; esac
+    [ -f "$APKS/$F" ] || fail "文件不存在"
+    LBL=$(printf '%s' "$BODY" | tr -d '\r\n|\\' | head -c 40)
+    mkdir -p "$APKS/.labels" 2>/dev/null
+    if [ -n "$LBL" ]; then
+        printf '%s\n' "$LBL" > "$APKS/.labels/$F"
+    else
+        rm -f "$APKS/.labels/$F"
+    fi
+    echo "$(date '+%F %T')|admin|set_label|$F|$LBL" >> "$PRIV/audit.log"
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1,"label":%s}' "$(json_str "$LBL")"
+    ;;
+
+set_pkg)
+    # 浏览器解析出包名后回写缓存：name=<apk文件名>，body=包名
+    F=$(qget name)
+    case "$F" in *.apk) ;; *) fail "文件名不合法" ;; esac
+    [ -f "$APKS/$F" ] || fail "文件不存在"
+    PKG=$(printf '%s' "$BODY" | tr -d '\r\n' | tr -cd 'A-Za-z0-9._-' | head -c 120)
+    case "$PKG" in *.*) ;; *) fail "包名格式不对（须含 .）" ;; esac
+    mkdir -p "$APKS/.pkgs" 2>/dev/null
+    printf '%s\n' "$PKG" > "$APKS/.pkgs/$F"
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1}'
+    ;;
+
+upload)
+    F=$(qget name)
+    case "$F" in *.apk) ;; *) fail "只能上传 .apk 文件" ;; esac
+    [ -s "$IN_TMP" ] || { rm -f "$IN_TMP"; fail "上传内容为空"; }
+    mkdir -p "$APKS" 2>/dev/null
+    mv "$IN_TMP" "$APKS/$F" || fail "保存失败"
+    echo "$(date '+%F %T')|admin|upload|$F|$(wc -c < "$APKS/$F")" >> "$PRIV/audit.log"
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1,"file":"%s"}' "$F"
+    ;;
+
+delete_apk)
+    F=$(qget name)
+    case "$F" in *.apk) ;; *) fail "文件名不合法" ;; esac
+    [ -f "$APKS/$F" ] || fail "文件不存在"
+    rm -f "$APKS/$F" "$APKS/.pkgs/$F" "$APKS/.labels/$F"
+    echo "$(date '+%F %T')|admin|delete_apk|$F" >> "$PRIV/audit.log"
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1}'
+    ;;
+
+rename_apk)
+    F=$(qget from)
+    T=$(qget to)
+    case "$F" in *.apk) ;; *) fail "源文件名不合法" ;; esac
+    case "$T" in *.apk) ;; *) fail "新文件名必须以 .apk 结尾" ;; esac
+    [ -f "$APKS/$F" ] || fail "文件不存在"
+    [ "$F" = "$T" ] && fail "名字没变"
+    mv "$APKS/$F" "$APKS/$T" || fail "改名失败"
+    [ -f "$APKS/.pkgs/$F" ] && mv "$APKS/.pkgs/$F" "$APKS/.pkgs/$T"
+    [ -f "$APKS/.labels/$F" ] && mv "$APKS/.labels/$F" "$APKS/.labels/$T"
+    echo "$(date '+%F %T')|admin|rename_apk|$F|$T" >> "$PRIV/audit.log"
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1}'
+    ;;
+
+send_cmd)
+    # 向指定方案追加一条远程指令：op=send_cmd&plan=<方案>&verb=<动作>，POST body 第1行=参数(如脚本URL) 第2行=md5(可选)
+    PN=$(qget plan)
+    VB=$(qget verb)
+    [ -n "$PN" ] || fail "缺少方案名"
+    case "$PN" in *[!A-Za-z0-9_-]*) fail "方案名不合法" ;; esac
+    [ -f "$PRIV/plans/$PN.txt" ] || fail "方案不存在"
+    case "$VB" in
+        report|reboot|memclean|clearcache|dns|wifi|oem|maint|status|sh) ;;
+        *) fail "动作不在白名单内" ;;
+    esac
+    A1=$(printf '%s\n' "$BODY" | sed -n 1p | tr -d '\r\n' | cut -c 1-300)
+    A2=$(printf '%s\n' "$BODY" | sed -n 2p | tr -d '\r\n' | tr -cd 'a-fA-F0-9' | cut -c 1-32)
+    if [ -n "$A1" ]; then
+        # 白名单过滤（不用 case 字符类，busybox ash 对含 & 的字符类会解析失败）
+        SAFE=$(printf '%s' "$A1" | tr -cd 'A-Za-z0-9:/._%?=,&+-')
+        [ "$SAFE" = "$A1" ] || fail "指令参数含非法字符"
+    fi
+    if [ "$VB" = "sh" ] && [ -z "$A1" ]; then fail "sh 动作必须给出脚本 URL"; fi
+    NONCE=$(date +%s)
+    cp "$PRIV/plans/$PN.txt" "$PRIV/plans/$PN.txt.bak" 2>/dev/null
+    printf 'cmd|%s|%s|%s|%s\n' "$NONCE" "$VB" "$A1" "$A2" >> "$PRIV/plans/$PN.txt"
+    echo "$(date '+%F %T')|admin|send_cmd|$PN|$VB|$NONCE" >> "$PRIV/audit.log"
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1,"nonce":"%s","verb":"%s"}' "$NONCE" "$VB"
+    ;;
+
+cmds)
+    printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
+    tail -n 60 "$PRIV/cmds.log" 2>/dev/null
+    ;;
+
+audit)
+    printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
+    tail -n 200 "$PRIV/audit.log" 2>/dev/null
+    ;;
+
+geo)
+    # 归属地缓存 5 分钟内没刷过就后台刷一次（不阻塞响应）
+    if [ -z "$(find "$PRIV/locations.txt" -mmin -5 2>/dev/null)" ]; then
+        sh "$PRIV/geo-lookup.sh" >/dev/null 2>&1 &
+    fi
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1,"rows":['
+    # 每台盒子取 access.log 最新一条（有 id 按 id 去重，无 id 按 ip），归属地/运营商取 ipcache
+    awk -F'|' '{k=($2!=""?$2:"noip-"$4); r[k]=$0} END{for(i in r) print r[i]}' "$PRIV/access.log" 2>/dev/null | sort | while IFS='|' read -r DT ID MAC IP SDK MODEL PLAN NOTE REST; do
+        [ -n "$IP" ] || continue
+        # 过滤手工测试残留的短身份（真机为 12 位 MAC 或更长序列号）
+        case "$ID" in "") ;; ???????*) ;; *) continue ;; esac
+        case "$IP" in
+            192.168.*|10.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|127.*)
+                G="内网/本机"; ISP=""
+                ;;
+            *)
+                G=""; ISP=""
+                if [ -s "$PRIV/ipcache/$IP" ]; then
+                    G=$(sed -n 1p "$PRIV/ipcache/$IP"); ISP=$(sed -n 2p "$PRIV/ipcache/$IP")
+                fi
+                [ -n "$G" ] || G="未解析"
+                ;;
+        esac
+        # 老数据 NOTE 字段可能混入后面的心跳字段，只取第一段
+        N=$(printf '%s' "$NOTE" | cut -d'|' -f1)
+        printf '{"t":%s,"id":%s,"ip":%s,"model":%s,"sdk":%s,"plan":%s,"note":%s,"geo":%s,"isp":%s},' \
+            "$(json_str "$DT")" "$(json_str "$ID")" "$(json_str "$IP")" \
+            "$(json_str "$MODEL")" "$(json_str "$SDK")" "$(json_str "$PLAN")" "$(json_str "$N")" \
+            "$(json_str "$G")" "$(json_str "$ISP")"
+    done | sed 's/,$//'
+    echo ']}'
+    ;;
+
+georaw)
+    printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
+    cat "$PRIV/locations.txt" 2>/dev/null
+    ;;
+
+logtail)
+    printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
+    tail -n 60 "$PRIV/access.log" 2>/dev/null
+    ;;
+
+get_settings)
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1,"srvurl":%s,"srcnet":%s,"online_h":"%s","apks_dir":%s}' \
+        "$(json_str "$SRVURL")" "$(json_str "$SRCNET")" "$ONLINE_H" "$(json_str "$APKS_DIR")"
+    ;;
+
+save_settings)
+    # POST body 三行：SRVURL / SRCNET / ONLINE_H（留空 = 保持默认）
+    L1=$(printf '%s\n' "$BODY" | sed -n 1p | tr -d '\r\n')
+    L2=$(printf '%s\n' "$BODY" | sed -n 2p | tr -d '\r\n')
+    L3=$(printf '%s\n' "$BODY" | sed -n 3p | tr -d '\r\n')
+    # SRVURL：http(s):// 开头，字符白名单，去尾部斜杠
+    U=$(printf '%s' "$L1" | tr -cd 'A-Za-z0-9:/._-')
+    case "$U" in
+        "") ;;
+        http://*|https://*) U=$(printf '%s' "$U" | sed 's|/*$||') ;;
+        *) fail "服务地址必须以 http:// 或 https:// 开头" ;;
+    esac
+    case "$U" in *[!A-Za-z0-9:/._-]*) fail "服务地址含非法字符" ;; esac
+    # SRCNET：数字加点
+    N=$(printf '%s' "$L2" | tr -cd '0-9.')
+    case "$N" in *[!0-9.]*) fail "网段只能包含数字和点" ;; esac
+    if [ -n "$N" ]; then
+        case "$N" in *.*) ;; *) fail "网段要写成前缀形式，如 192.168.1." ;; esac
+        case "$N" in *.|"") ;; *) N="$N." ;; esac
+        L=$(printf '%s' "$N" | wc -c); [ "$L" -le 16 ] || fail "网段太长"
+    fi
+    case "$L3" in "") ;; *)
+        case "$L3" in *[!0-9]*) fail "在线窗口必须是小时数字" ;; esac
+        [ "$L3" -ge 1 ] && [ "$L3" -le 720 ] || fail "在线窗口限 1-720 小时"
+    ;; esac
+    # 第 4 行：APK 存放位置（空 = 用默认 /srv/tvupd/apks）
+    A4=$(printf '%s\n' "$BODY" | sed -n 4p | tr -d '\r\n' | tr -cd '/A-Za-z0-9._-' | sed 's|/*$||')
+    case "$A4" in ""|/*..*|*..*) A4="$APKS_DEF" ;; esac
+    # 改了目录：迁移现有 APK（含 .pkgs/.labels），并在默认位置留软链，下载链接不变
+    if [ "$A4" != "$APKS" ]; then
+        mkdir -p "$A4" 2>/dev/null || fail "无法创建目录 $A4"
+        if [ -d "$APKS" ] && [ ! -L "$APKS" ]; then
+            cp -a "$APKS"/. "$A4"/ 2>/dev/null
+            rm -rf "$APKS"
+        fi
+        ln -sfn "$A4" /srv/tvupd/apks
+        APKS="$A4"
+    fi
+    mkdir -p "$PRIV" 2>/dev/null
+    {
+        [ -n "$U" ] && printf 'SRVURL="%s"\n' "$U"
+        [ -n "$N" ] && printf 'SRCNET="%s"\n' "$N"
+        [ -n "$L3" ] && printf 'ONLINE_H="%s"\n' "$L3"
+        printf 'APKS_DIR="%s"\n' "$A4"
+    } > "$PRIV/settings.env"
+    echo "$(date '+%F %T')|admin|save_settings|$U|$N|$L3|$A4" >> "$PRIV/audit.log"
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1}'
+    ;;
+
+set_pwd)
+    # 修改管理密码：POST body = 新密码（字母数字，≥6 位）
+    P=$(printf '%s' "$BODY" | tr -cd 'a-zA-Z0-9')
+    L=$(printf '%s' "$P" | wc -c)
+    [ "$L" -ge 6 ] && [ "$L" -le 32 ] || fail "密码须为 6-32 位字母数字"
+    printf '%s\n' "$P" > "$PRIV/admin.pwd"
+    echo "$(date '+%F %T')|admin|set_pwd|len=$L" >> "$PRIV/audit.log"
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1}'
+    ;;
+
+sysinfo)
+    # 路由器/服务当前配置（只读展示，作为设置页默认参考）
+    MD=$(cat /tmp/sysinfo/model 2>/dev/null)
+    OS=$(sed -n 's/^DISTRIB_DESCRIPTION="\{0,1\}\(.*\)"\{0,1\}$/\1/p' /etc/openwrt_release 2>/dev/null | head -n 1)
+    KR=$(uname -r)
+    UP=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+    UPD=$((UP / 86400)); UPH=$(((UP % 86400) / 3600))
+    MEMA=$(awk '/MemAvailable/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null)
+    MEMT=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null)
+    LANIP=$(uci -q get network.lan.ipaddr 2>/dev/null)
+    PORT=$(sed -n 's/^server\.port *= *//p' /etc/lighttpd/lighttpd.conf 2>/dev/null | head -n 1)
+    DSZ=$(df -k /srv 2>/dev/null | tail -n 1 | awk '{print $2}')
+    DUS=$(df -k /srv 2>/dev/null | tail -n 1 | awk '{print $3}')
+    DAV=$(df -k /srv 2>/dev/null | tail -n 1 | awk '{print $4}')
+    NDV=$(grep -cE '^[A-Za-z0-9_-]+\|' "$PRIV/devices.txt" 2>/dev/null)
+    NAP=$(ls "$APKS" 2>/dev/null | grep -c '\.apk$')
+    NPL=$(ls "$PRIV/plans" 2>/dev/null | grep -c 'txt$')
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1,"model":%s,"os":%s,"kernel":%s,"up":"%s天%s小时","mem_avail":"%s","mem_total":"%s","lan_ip":%s,"port":"%s","disk":"已用 %sMB / 共 %sMB（剩 %sMB）","devices":"%s","apks":"%s","plans":"%s","apk_dir":%s}' \
+        "$(json_str "$MD")" "$(json_str "$OS")" "$(json_str "$KR")" "$UPD" "$UPH" \
+        "${MEMA:-?}" "${MEMT:-?}" "$(json_str "$LANIP")" "$PORT" \
+        "$((DUS / 1024))" "$((DSZ / 1024))" "$((DAV / 1024))" \
+        "$NDV" "$NAP" "$NPL" "$(json_str "$APKS_DIR")"
+    ;;
+
+*)
+    fail "未知操作"
+    ;;
+esac

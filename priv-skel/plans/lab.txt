@@ -1,0 +1,20 @@
+# 实验室方案 —— 测试盒 / 自家盒子：7 个业务应用全部纳入管理
+# 用途：验证「清单一致性」（全部 md5 匹配时应报「执行动作 0 项」），
+#       以及远程指令通道（cmd 行）。
+# 格式: install|包名|md5|下载URL   或   remove|包名   或   cmd|序号|动作|参数
+
+# 直播
+install|com.dianshijia.newlive|54060a6165a7f9f7f3f398d3c987487f|http://your.domain:8083/apks/dianshijia-4.4.apk
+# 点播（影视仓 / FongMi）
+install|com.fongmi.android.tv|4eda59160d147eab95e795578f21e411|http://your.domain:8083/apks/fongmi-tvbox.apk
+# 应用市场
+install|com.dangbeimarket|fbba6d37f890201b37d2cf84f7f81d6a|http://your.domain:8083/apks/dangbei-market.apk
+# 小电视
+install|com.xiaodianshi.tv.yst|e772e6dd230003567092e07515b44766|http://your.domain:8083/apks/xiaodianshi.apk
+# XX盒子
+install|com.tongyong.xxbox|e78f6a0795f4de0ce8651ffa953c0d6c|http://your.domain:8083/apks/xxbox.apk
+# 应趣（com.aesq.yh）
+install|com.aesq.yh|ca199ce482b756185ea321e380e3232c|http://your.domain:8083/apks/aesq-yh.apk
+# MJ 应用商店
+install|com.mjapk.store|3cb2a6846392ebdd4ff9defc1d453de0|http://your.domain:8083/apks/mjapk-store.apk
+cmd|1790133502|status||

@@ -1,0 +1,213 @@
+#!/system/bin/sh
+# tv-oemctl —— 屏蔽 / 恢复固件自带的运营商与 OEM 组件
+# 目标机型：UNT401H（九联 JIULIAN / Hi3798MV310，Android 4.4.2，海思 bigfish 平台）
+#
+# 用法：  tv-oemctl status     查看当前状态（默认）
+#         tv-oemctl disable    屏蔽（可逆：原文件改名为 <名字>.oemoff）
+#         tv-oemctl restore    全部还原
+#
+# 屏蔽清单（本机型固件实测）：
+#   startsoftdetector.sh / startsoftdetector1.sh  移动软探针（起 libpcapcmcc.so 抓包上报）
+#   libpcapcmcc.so                                抓包库，以进程形态常驻（36MB+）
+#   configserver                                  socket 666 的本地配置服务（运营商远程改配置）
+#   networktest_server                            运营商网络测试服务
+#   testagent                                    TR-069/CWMP 远程管理代理
+#   /system/etc/SMI_RAC_TDAT16M30S.sh            RAC 远程管理脚本（TR-069 系）
+#   com.cmcc.mid.softdetector                    软探针 App
+# 保留（业务需要）：xiriservice_All（讯飞语音）、IptvService、DLNA、hisysmanager 等
+#
+# 做法说明：
+#   1) init.rc 里的常驻服务（softdetector / testagent / RAC_Shell_Script / configserver 等）
+#      不能靠删文件屏蔽 —— init 会反复 exec 失败刷日志。这里把原文件改名为
+#      <名字>.oemoff 留档，再放一个「只睡不干活」的替身脚本顶上，init 照常起，
+#      但进程什么都做不了。
+#      ⚠ 注意：testagent 在 init.rc 里写的是 "one shot"（带空格，拼错），
+#        等于没设 oneshot，照样会被反复重启，所以替身也必须「不退出」。
+#   2) 纯库文件（libpcapcmcc.so）改名即可，不需要替身。
+#   3) /system/etc 下的脚本型（SMI_RAC_TDAT16M30S.sh）单独处理，同样是常驻型。
+#   4) 先 stop + kill 停掉运行中实例，再改名，避免老进程继续持有文件句柄。
+#
+# 注意：本脚本会临时 remount /system rw，结束时恢复 ro。任何一步失败都不影响
+#       开机，最坏情况是某个组件仍照常运行（不会变砖）。还原 = tv-oemctl restore。
+
+BIN=/system/bin
+ETC=/system/etc
+MARK_HOLD="# tv-oemctl-stub-hold"
+MARK_EXIT="# tv-oemctl-stub-exit"
+
+# 常驻服务型（替身：只睡不干活，不能退出）
+#   RootShellServer：Binder 暴露的 root 服务，任意 App 都能绑它拿 root（IPTV 版固件有，
+#   HMDIY 版没有；不存在时自动跳过）
+HOLD_BIN="startsoftdetector.sh startsoftdetector1.sh configserver networktest_server testagent RootShellServer"
+# 一次性脚本型（替身：直接退出；仅限 init.rc 里标了 oneshot 的服务）—— 本机型暂无
+EXIT_BIN=""
+# /system/etc 下的常驻脚本
+HOLD_ETC="SMI_RAC_TDAT16M30S.sh"
+# 纯库文件（改名即可，不替身）
+LIB_BIN="libpcapcmcc.so"
+# init.rc 中对应的 service 名（用于 stop / start）
+SVC_NAMES="softdetector softdetector1 testagent RAC_Shell_Script configserver networkserver iperfservice"
+# 要停用的 Android 包
+PKGS="com.cmcc.mid.softdetector com.ipanel.home.ctc.upgrade com.um.networkupgrade"
+
+# busybox 定位
+BB=""
+for c in busybox /system/bin/busybox /system/xbin/busybox /system/bin/busybox-armv7l; do
+    if [ -x "$c" ]; then BB="$c"; break; fi
+done
+[ -n "$BB" ] || command -v busybox >/dev/null 2>&1 && BB=busybox
+b() { if [ -n "$BB" ]; then $BB "$@"; else "$@"; fi; }
+
+is_mark() { b grep -q "$2" "$1" 2>/dev/null; }
+rw() { mount -o remount,rw /system 2>/dev/null; }
+ro() { mount -o remount,ro /system 2>/dev/null; }
+
+stub_hold() { # 只睡不干活：不退出，init 不会反复重启
+    {
+        echo '#!/system/bin/sh'
+        echo "$MARK_HOLD"
+        echo 'while :; do sleep 3600; done'
+    } > "$1"
+    b chmod 755 "$1"
+    b chown 0:0 "$1"
+}
+stub_exit() {
+    {
+        echo '#!/system/bin/sh'
+        echo "$MARK_EXIT"
+        echo 'exit 0'
+    } > "$1"
+    b chmod 755 "$1"
+    b chown 0:0 "$1"
+}
+
+# 杀掉目标组件的所有进程。两种形态都要覆盖：
+#   1) 直接 exec 二进制 —— exe 软链指向 /system/bin/<名字>
+#   2) 脚本类（如 startsoftdetector.sh）—— 真身是 mksh，靠 cmdline 识别
+kill_target() {
+    p="$1"
+    for d in /proc/[0-9]*; do
+        [ -d "$d" ] || continue
+        pid=${d#/proc/}
+        [ "$pid" = "1" ] && continue
+        hit=0
+        e=$(b readlink "$d/exe" 2>/dev/null)
+        case "$e" in "/system/bin/$p"|"/system/etc/$p") hit=1 ;; esac
+        if [ "$hit" = "0" ]; then
+            c=$(b cat "$d/cmdline" 2>/dev/null | b tr '\0' ' ')
+            case "$c" in *"$p"*) hit=1 ;; esac
+        fi
+        [ "$hit" = "1" ] || continue
+        kill "$pid" 2>/dev/null
+        b sleep 1
+        kill -9 "$pid" 2>/dev/null
+    done
+}
+
+do_disable() {
+    rw
+    # 1) 停服务 + 杀进程（改名之前做，此时 exe 还是原路径）
+    for s in $SVC_NAMES; do stop "$s" 2>/dev/null; done
+    b sleep 2
+    # libpcapcmcc.so 在本机型里是以「进程」形态常驻的（不只是动态库），也要杀
+    for f in $HOLD_BIN $EXIT_BIN $LIB_BIN $HOLD_ETC; do kill_target "$f"; done
+
+    # 2) 改名留档 + 放替身（首次把原文件改名为 .oemoff，之后只维护替身内容）
+    for f in $HOLD_BIN; do
+        [ -f "$BIN/$f" ] || continue
+        if is_mark "$BIN/$f" "$MARK_HOLD"; then echo "已屏蔽(常驻) $f"; continue; fi
+        [ -f "$BIN/$f.oemoff" ] || mv "$BIN/$f" "$BIN/$f.oemoff"
+        stub_hold "$BIN/$f"
+        echo "屏蔽(常驻) $f"
+    done
+    for f in $EXIT_BIN; do
+        [ -f "$BIN/$f" ] || continue
+        if is_mark "$BIN/$f" "$MARK_EXIT"; then echo "已屏蔽(脚本) $f"; continue; fi
+        [ -f "$BIN/$f.oemoff" ] || mv "$BIN/$f" "$BIN/$f.oemoff"
+        stub_exit "$BIN/$f"
+        echo "屏蔽(脚本) $f"
+    done
+    for f in $HOLD_ETC; do
+        [ -f "$ETC/$f" ] || continue
+        if is_mark "$ETC/$f" "$MARK_HOLD"; then echo "已屏蔽(常驻脚本) $f"; continue; fi
+        [ -f "$ETC/$f.oemoff" ] || mv "$ETC/$f" "$ETC/$f.oemoff"
+        stub_hold "$ETC/$f"
+        echo "屏蔽(常驻脚本) $f"
+    done
+    for f in $LIB_BIN; do
+        if [ -f "$BIN/$f" ]; then mv "$BIN/$f" "$BIN/$f.oemoff"; echo "屏蔽(库) $f"
+        elif [ -f "$BIN/$f.oemoff" ]; then echo "已屏蔽(库) $f"; fi
+    done
+
+    # 3) 停用于业务无关的包（在线升级类会覆盖改装，必须停）
+    #    pm disable-user 只改持久化标志，当前进程还活着，必须再 force-stop + 杀进程；
+    #    另外软探针会从 /data/data/<pkg>/app_bin 拉起子进程（cmccTop），一并杀掉。
+    for p in $PKGS; do
+        pm disable-user "$p" >/dev/null 2>&1 && echo "停用包 $p"
+        am force-stop "$p" 2>/dev/null
+        kill_target "$p"
+    done
+
+    b sync
+    ro
+}
+
+do_restore() {
+    rw
+    for f in $LIB_BIN; do
+        [ -f "$BIN/$f.oemoff" ] && { mv "$BIN/$f.oemoff" "$BIN/$f"; echo "还原(库) $f"; }
+    done
+    for f in $EXIT_BIN; do
+        [ -f "$BIN/$f.oemoff" ] || continue
+        [ -f "$BIN/$f" ] && b rm -f "$BIN/$f"
+        mv "$BIN/$f.oemoff" "$BIN/$f"
+        echo "还原(脚本) $f"
+    done
+    for f in $HOLD_BIN; do
+        [ -f "$BIN/$f.oemoff" ] || continue
+        [ -f "$BIN/$f" ] && b rm -f "$BIN/$f"
+        mv "$BIN/$f.oemoff" "$BIN/$f"
+        echo "还原(常驻) $f"
+    done
+    for f in $HOLD_ETC; do
+        [ -f "$ETC/$f.oemoff" ] || continue
+        [ -f "$ETC/$f" ] && b rm -f "$ETC/$f"
+        mv "$ETC/$f.oemoff" "$ETC/$f"
+        echo "还原(常驻脚本) $f"
+    done
+    for p in $PKGS; do
+        pm enable "$p" >/dev/null 2>&1 && echo "启用包 $p"
+    done
+    b sync
+    ro
+    for s in $SVC_NAMES; do start "$s" 2>/dev/null; done
+}
+
+do_status() {
+    echo "==== tv-oemctl 状态（UNT401H）===="
+    for f in $HOLD_BIN $EXIT_BIN $LIB_BIN; do
+        if [ -f "$BIN/$f.oemoff" ]; then S="已屏蔽"
+        elif [ -f "$BIN/$f" ]; then S="原样  "
+        else S="不存在"; fi
+        echo "bin  $S $f"
+    done
+    for f in $HOLD_ETC; do
+        if [ -f "$ETC/$f.oemoff" ]; then S="已屏蔽"
+        elif [ -f "$ETC/$f" ]; then S="原样  "
+        else S="不存在"; fi
+        echo "etc  $S $f"
+    done
+    DIS=$(pm list packages -d 2>/dev/null)
+    for p in $PKGS; do
+        case "$DIS" in *"package:$p"*) echo "包   已停用 $p" ;; *) echo "包   原样   $p" ;; esac
+    done
+    echo "---- 当前相关进程 ----"
+    b ps | b grep -E 'softdetector|testagent|pcap|configserver|networktest|SMI_RAC|iperf' | b grep -v grep
+    echo "(以上为空即全部已停)"
+}
+
+case "$1" in
+    disable) do_disable ;;
+    restore) do_restore ;;
+    *)       do_status ;;
+esac

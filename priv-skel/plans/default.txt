@@ -1,0 +1,17 @@
+# 默认方案 —— 未登记的盒子走这套（新盒出厂基线：直播 + 应用市场 + 点播）
+# 格式: install|包名|md5|下载URL   或   remove|包名   或   cmd|序号|动作|参数
+#
+# 远程指令（cmd）说明：序号随便起（建议用时间戳），盒子执行过就记档，永不重复执行。
+# 动作白名单：report / reboot / memclean / clearcache / dns / wifi / oem / maint / status
+#            sh（从本服务器下载脚本 + md5 校验后以 root 执行，远程救砖用）
+# 例：cmd|20260923001|reboot
+#     cmd|20260923002|sh|http://your.domain:8083/scripts/fix.sh|<脚本md5>
+
+# 直播（电视家 4.4 版）
+install|com.dianshijia.newlive|54060a6165a7f9f7f3f398d3c987487f|http://your.domain:8083/apks/dianshijia-4.4.apk
+
+# 应用市场（当贝市场）
+install|com.dangbeimarket|fbba6d37f890201b37d2cf84f7f81d6a|http://your.domain:8083/apks/dangbei-market.apk
+
+# 点播（影视仓 / FongMi）
+install|com.fongmi.android.tv|4eda59160d147eab95e795578f21e411|http://your.domain:8083/apks/fongmi-tvbox.apk

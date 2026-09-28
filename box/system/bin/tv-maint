@@ -1,0 +1,217 @@
+#!/system/bin/sh
+# tv-maint —— 盒子日常维护动作集合
+#
+# 两个调用方：
+#   1) /system/etc/install-recovery-2.sh 的维护循环（定时：每日内存回收、每周清缓存、
+#      凌晨空闲重启、开机后重新固定 DNS / Wi-Fi 策略 / 重新应用 OEM 屏蔽）
+#   2) tv-updater 的远程指令通道（清单里的 cmd|<nonce>|<动作> 行）
+#
+# 子命令：
+#   dns         固定公共 DNS（防运营商劫持；失败自动回退到 DHCP 下发的 DNS）
+#   wifi        Wi-Fi 永不休眠（老盒子休眠会断流）
+#   mem [force] 内存回收（默认仅在可用内存低于阈值时执行，force 强制）
+#   cache       清应用缓存（走 installd 的 pm trim-caches，不动应用数据）
+#   oem         重新应用运营商/OEM 组件屏蔽（幂等）
+#   idle-reboot 判断是否处于「闲置时段 + 长时间运行」，满足则重启
+#   status      打印当前状态
+#   all         等价于 dns + wifi + mem + oem（开机时用）
+#
+# 本机 shell 无 printf，全部用 echo。
+
+CONF=/system/etc/tv-updater.conf
+[ -f "$CONF" ] && . "$CONF"
+
+DNS1=${DNS1:-223.5.5.5}       # 阿里公共 DNS
+DNS2=${DNS2:-119.29.29.29}    # 腾讯公共 DNS
+DNS_FORCE=${DNS_FORCE:-1}     # 1=额外用 iptables 强制劫持 UDP/TCP 53 到公共 DNS
+WIFI_KEEP=${WIFI_KEEP:-1}
+MEM_LOW_MB=${MEM_LOW_MB:-150}          # 可用内存低于此值时做内存回收
+IDLE_HOUR_FROM=${IDLE_HOUR_FROM:-3}    # 允许重启的时间窗（小时，含）
+IDLE_HOUR_TO=${IDLE_HOUR_TO:-5}        # （不含）
+IDLE_MIN_UP_H=${IDLE_MIN_UP_H:-20}     # 至少已运行这么久才允许重启
+IDLE_PKGS=${IDLE_PKGS:-com.dangbei.tvlauncher com.android.launcher3 com.android.launcher com.hisilicon.launcher}
+
+WORK=/data/local/tv-updater
+LOG=$WORK/maint.log
+
+# busybox 定位：本机 shell 的 PATH 可能不带 busybox，toolbox 又缺 wget/date/cut，
+# 这里显式探测常用路径，找不到再退回系统命令（此时 wget 等会失败，日志里能看出来）。
+# 注意别写成 "[ -n "$BB" ] || cmd && BB=xxx" —— shell 的 || && 短路会无条件执行后半句。
+BB=""
+for c in /system/bin/busybox /system/xbin/busybox /system/bin/busybox-armv7l busybox; do
+    if [ -x "$c" ]; then BB="$c"; break; fi
+done
+if [ -z "$BB" ]; then
+    command -v busybox >/dev/null 2>&1 && BB=busybox
+fi
+export TZ=CST-8   # 本机 busybox date 默认按 UTC 输出，不纠正日志会差 8 小时
+b() { if [ -n "$BB" ]; then $BB "$@"; else "$@"; fi; }
+
+b mkdir -p "$WORK" 2>/dev/null
+
+log() { echo "$(b date '+%F %T') $*" >> "$LOG" 2>/dev/null; }
+
+uptime_h() {
+    U=$(b cut -d' ' -f1 /proc/uptime 2>/dev/null)
+    echo $(( ${U%.*} / 3600 ))
+}
+
+mem_avail_mb() { # 可用内存 = free + buffers + cached
+    b free -m 2>/dev/null | b awk '/Mem:/{print $4+$6+$7; exit}'
+}
+
+# ---------- 固定公共 DNS ----------
+apply_dns() {
+    setprop net.dns1 "$DNS1"
+    setprop net.dns2 "$DNS2"
+    for i in wlan0 eth0; do
+        ndc resolver setifdns $i "$DNS1" "$DNS2" >/dev/null 2>&1
+        ndc resolver setdefaultif $i >/dev/null 2>&1
+    done
+}
+
+do_dns() {
+    OLD=$(getprop net.dns1)
+    HOSTT=$(echo "$MANIFEST_URL" | b sed 's#^http://##; s#[/:?].*##')
+    [ -n "$HOSTT" ] || HOSTT=baidu.com
+
+    apply_dns
+    if ping -c 1 -W 3 "$HOSTT" >/dev/null 2>&1; then
+        if [ "$DNS_FORCE" = "1" ]; then
+            iptables -t nat -C OUTPUT -p udp --dport 53 -j DNAT --to-destination "$DNS1:53" >/dev/null 2>&1 || \
+                iptables -t nat -A OUTPUT -p udp --dport 53 -j DNAT --to-destination "$DNS1:53" >/dev/null 2>&1
+            iptables -t nat -C OUTPUT -p tcp --dport 53 -j DNAT --to-destination "$DNS1:53" >/dev/null 2>&1 || \
+                iptables -t nat -A OUTPUT -p tcp --dport 53 -j DNAT --to-destination "$DNS1:53" >/dev/null 2>&1
+        fi
+        log "DNS 已固定为 $DNS1/$DNS2（原 $OLD，解析 $HOSTT 正常）"
+        return 0
+    fi
+
+    # 公共 DNS 解析不了，再判断是「公共 DNS 被运营商拦」还是「网络根本没通」：
+    # 临时切回原 DNS 试一次，原 DNS 能解析才算前者（此时回退），否则保留公共 DNS 等下一轮。
+    if [ -n "$OLD" ] && [ "$OLD" != "$DNS1" ]; then
+        setprop net.dns1 "$OLD"
+        for i in wlan0 eth0; do ndc resolver setifdns $i "$OLD" '' >/dev/null 2>&1; done
+        if ping -c 1 -W 3 "$HOSTT" >/dev/null 2>&1; then
+            log "公共 DNS 解析失败但原 DNS($OLD) 可用，已回退"
+            return 1
+        fi
+    fi
+    apply_dns
+    log "网络未就绪，公共 DNS 已预设（$DNS1），下一轮复检"
+    return 1
+}
+
+# ---------- Wi-Fi 永不休眠 ----------
+do_wifi() {
+    [ "$WIFI_KEEP" = "1" ] || return 0
+    settings put global wifi_sleep_policy 2 >/dev/null 2>&1   # 2 = NEVER
+    settings put system wifi_sleep_policy 2 >/dev/null 2>&1   # 部分固件读 system 表
+    settings put global wifi_scan_always_enabled 0 >/dev/null 2>&1
+    log "Wi-Fi 策略已设为永不休眠"
+}
+
+# ---------- 内存回收 ----------
+do_mem() {
+    A=$(mem_avail_mb)
+    case "$A" in ''|*[!0-9]*) A=99999 ;; esac
+    if [ "$1" != "force" ] && [ "$A" -ge "$MEM_LOW_MB" ]; then
+        return 0
+    fi
+    sync
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+    am kill-all >/dev/null 2>&1
+    b sleep 2
+    B=$(mem_avail_mb)
+    log "内存回收：可用 ${A}MB -> ${B}MB"
+}
+
+# ---------- 清应用缓存 ----------
+do_cache() {
+    # pm trim-caches：交给 installd 按目标空闲空间清「应用缓存」，不碰应用数据/登录态
+    pm trim-caches 4G >/dev/null 2>&1
+    sync
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+    log "应用缓存已清理（pm trim-caches 4G）"
+}
+
+# ---------- 重新应用 OEM 屏蔽 ----------
+do_oem() {
+    [ -x /system/bin/tv-oemctl ] || return 0
+    /system/bin/tv-oemctl disable >/dev/null 2>&1
+}
+
+# ---------- 空闲时段重启 ----------
+foreground_pkg() {
+    b dumpsys activity activities 2>/dev/null | b sed -n 's/.*mFocusedActivity:.* \([A-Za-z0-9._]*\)\/.*/\1/p' | b sed -n 1p
+}
+screen_on() {
+    b dumpsys power 2>/dev/null | b sed -n 's/.*mScreenOn=\([a-z]*\).*/\1/p' | b sed -n 1p
+}
+
+do_idle_reboot() {
+    H=$(b date +%H | b sed 's/^0*//')
+    [ -n "$H" ] || H=0
+    case "$H" in *[!0-9]*) return 0 ;; esac
+
+    IN_WIN=0
+    if [ "$IDLE_HOUR_FROM" -le "$IDLE_HOUR_TO" ]; then
+        [ "$H" -ge "$IDLE_HOUR_FROM" ] && [ "$H" -lt "$IDLE_HOUR_TO" ] && IN_WIN=1
+    else
+        # 跨零点窗口，如 23..5
+        { [ "$H" -ge "$IDLE_HOUR_FROM" ] || [ "$H" -lt "$IDLE_HOUR_TO" ]; } && IN_WIN=1
+    fi
+    [ "$IN_WIN" = "1" ] || return 0
+
+    UH=$(uptime_h)
+    case "$UH" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$UH" -ge "$IDLE_MIN_UP_H" ] || return 0
+
+    SC=$(screen_on)
+    FG=$(foreground_pkg)
+    IDLE=0
+    [ "$SC" = "false" ] && IDLE=1
+    if [ "$IDLE" = "0" ] && [ -n "$FG" ]; then
+        for p in $IDLE_PKGS; do
+            [ "$FG" = "$p" ] && IDLE=1
+        done
+    fi
+    [ "$IDLE" = "1" ] || return 0
+
+    log "空闲时段重启：${H}点 已运行${UH}小时 屏幕=${SC} 前台=${FG}"
+    b sleep 3
+    sync
+    reboot
+}
+
+do_status() {
+    echo "==== tv-maint 状态 ===="
+    echo "可用内存 : $(mem_avail_mb) MB"
+    echo "运行时长 : $(uptime_h) 小时"
+    echo "DNS      : net.dns1=$(getprop net.dns1) net.dns2=$(getprop net.dns2)"
+    echo "Wi-Fi    : sleep_policy=$(settings get global wifi_sleep_policy 2>/dev/null)"
+    echo "前台应用 : $(foreground_pkg)"
+    echo "屏幕     : $(screen_on)"
+    echo "第三方应用: $(pm list packages -3 2>/dev/null | b wc -l) 个"
+    echo "OEM 组件 :"
+    [ -x /system/bin/tv-oemctl ] && /system/bin/tv-oemctl status | b sed -n '2,12p'
+}
+
+case "$1" in
+    dns)         do_dns ;;
+    wifi)        do_wifi ;;
+    mem)         do_mem "$2" ;;
+    cache)       do_cache ;;
+    oem)         do_oem ;;
+    idle-reboot) do_idle_reboot ;;
+    status)      do_status ;;
+    all)
+        do_dns
+        do_wifi
+        do_mem
+        do_oem
+        ;;
+    *)
+        do_status
+        ;;
+esac

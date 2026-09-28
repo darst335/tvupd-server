@@ -1,0 +1,7 @@
+# 路由器上都是 busybox ash，必须保持 LF，禁止任何 CRLF 转换
+* text=auto eol=lf
+*.sh text eol=lf
+*.js text eol=lf
+*.html text eol=lf
+*.md text eol=lf
+*.txt text eol=lf

@@ -1,0 +1,14 @@
+# 长辈方案 —— 极简：只留大字直播，其余第三方应用全部卸载
+# 格式: install|包名|md5|下载URL   或   remove|包名   或   cmd|序号|动作|参数
+
+# 直播（电视家 4.4 版）
+install|com.dianshijia.newlive|54060a6165a7f9f7f3f398d3c987487f|http://your.domain:8083/apks/dianshijia-4.4.apk
+
+# 以下全部卸载，避免老人误触
+remove|jackpal.androidterm
+remove|com.fongmi.android.tv
+remove|com.tongyong.xxbox
+remove|com.aesq.yh
+remove|com.xiaodianshi.tv.yst
+remove|com.mjapk.store
+remove|com.dangbeimarket
