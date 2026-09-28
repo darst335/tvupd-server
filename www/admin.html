@@ -151,7 +151,7 @@ pre.log{background:#161b22;color:#c9d1d9;font:12px/1.5 Consolas,monospace;paddin
       <label class="pri" style="display:inline-block;cursor:pointer">⬆ 上传 APK（可多选）
         <input type="file" id="apk-file" accept=".apk" multiple style="display:none" onchange="uploadApks(this.files)">
       </label>
-      <span class="muted">包名会在控制台首次使用该 APK 时自动识别并缓存</span>
+      <span class="muted">上传自动按包名命名、并读取 APK 内定义的应用名作为中文名（可改）；旧文件名不规范的点「改为包名」</span>
     </div>
     <table id="t-ap"><thead><tr>
       <th style="width:19%">文件名</th><th style="width:13%">中文名</th><th style="width:17%">包名</th><th style="width:7%">大小</th><th style="width:18%">md5</th><th style="width:26%">操作</th>
@@ -620,7 +620,7 @@ function parseAxmlPkg(x){
         for(let i=0;i<aCnt;i++){
           const o=ap+i*aSize;
           if(strs[axU32(x,o+4)]==='package'){
-            const raw=axU32(x,o+8), dt=x[o+8+12+3], dat=axU32(x,o+8+16);
+            const raw=axU32(x,o+8), dt=x[o+15], dat=axU32(x,o+16); // Res_value 偏移同 parseAxmlLabel
             const v=raw!==0xffffffff?strs[raw]:(dt===3?strs[dat]:'');
             if(v)return v;
           }
@@ -632,33 +632,135 @@ function parseAxmlPkg(x){
   }catch(e){}
   return '';
 }
-async function apkPkg(a){
+/* ---- 通用：从 ZIP(Uint8Array) 里取某个条目的内容（stored / deflate 均可） ---- */
+async function zipEntry(buf,name){
+  for(let i=0;i<buf.length-30;i++){
+    if(buf[i]===0x50&&buf[i+1]===0x4b&&buf[i+2]===3&&buf[i+3]===4){ // 本地文件头
+      const nlen=axU16(buf,i+26),elen=axU16(buf,i+28);
+      let nm='';for(let j=0;j<nlen;j++)nm+=String.fromCharCode(buf[i+30+j]);
+      if(nm!==name)continue;
+      const method=axU16(buf,i+8),csz=axU32(buf,i+18);
+      const ds=i+30+nlen+elen;
+      if(method===0)return buf.subarray(ds,ds+(csz||buf.length-ds));
+      try{ // deflate：流式解压，中途出错也保留已解出的部分
+        const st=new Blob([buf.slice(ds)]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+        const rd=st.getReader();const parts=[];
+        while(true){try{const{done,value}=await rd.read();if(done)break;parts.push(value);}catch(e){break;}}
+        const out=new Uint8Array(parts.reduce((n,c)=>n+c.length,0));
+        let o=0;for(const c of parts){out.set(c,o);o+=c.length;}
+        return out;
+      }catch(e){return null;}
+    }
+  }
+  return null;
+}
+function axmlPool(x,p){ // p = RES_STRING_POOL_TYPE 块起点 → 字符串数组
+  const cnt=axU32(x,p+8),flags=axU32(x,p+16),sstart=axU32(x,p+20);
+  const base=p+sstart,strs=[];
+  for(let i=0;i<cnt;i++){
+    let off=base+axU32(x,p+axU16(x,p+2)+i*4),s='';
+    if(flags&0x100){ // UTF-8
+      const a=(x[off]&0x80)?2:1,b=(x[off+a]&0x80)?2:1;
+      const bl=(x[off+a]&0x80)?((x[off+a]&0x7f)<<8)|x[off+a+1]:x[off+a];
+      s=new TextDecoder('utf-8').decode(x.subarray(off+a+b,off+a+b+bl));
+    }else{
+      let l=axU16(x,off);if(l&0x8000)l=((l&0x7fff)<<16)|axU16(x,off+2),off+=2;
+      s=new TextDecoder('utf-16le').decode(x.subarray(off+2,off+2+l*2));
+    }
+    strs.push(s);
+  }
+  return strs;
+}
+/* ---- AXML 里找 <application android:label>：字面量返回 {type:'str'}，@引用返回 {type:'ref'} ---- */
+function parseAxmlLabel(x){
   try{
-    const r=await fetch('apks/'+encodeURIComponent(a.file),{headers:{'Range':'bytes=0-524287'}});
-    const buf=new Uint8Array(await r.arrayBuffer());
-    let xml=null;
-    for(let i=0;i<buf.length-30;i++){
-      if(buf[i]===0x50&&buf[i+1]===0x4b&&buf[i+2]===3&&buf[i+3]===4){ // 本地文件头
-        const nlen=axU16(buf,i+26), elen=axU16(buf,i+28);
-        let nm='';for(let j=0;j<nlen;j++)nm+=String.fromCharCode(buf[i+30+j]);
-        if(nm!=='AndroidManifest.xml')continue;
-        const method=axU16(buf,i+8), csz=axU32(buf,i+18);
-        const ds=i+30+nlen+elen;
-        if(method===0){xml=buf.subarray(ds,ds+(csz||buf.length-ds));break;}
-        try{ // deflate：流式解压，中途出错也保留已解出的部分
-          const st=new Blob([buf.slice(ds)]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-          const rd=st.getReader();const parts=[];
-          while(true){try{const{done,value}=await rd.read();if(done)break;parts.push(value);}catch(e){break;}}
-          xml=new Uint8Array(parts.reduce((n,c)=>n+c.length,0));
-          let o=0;for(const c of parts){xml.set(c,o);o+=c.length;}
-        }catch(e){}
-        break;
+    let p=8,strs=null;
+    const end=Math.min(x.length,axU32(x,4)||x.length);
+    while(p+8<=end){
+      const type=axU16(x,p),hsize=axU16(x,p+2),csize=axU32(x,p+4);
+      if(!csize)break;
+      if(type===0x0001)strs=axmlPool(x,p);
+      else if(type===0x0102&&strs){ // START_ELEMENT
+        const tag=strs[axU32(x,p+20)];
+        const aStart=axU16(x,p+hsize+8),aSize=axU16(x,p+hsize+10),aCnt=axU16(x,p+hsize+12);
+        const ap=p+hsize+aStart;
+        for(let i=0;i<aCnt;i++){
+          const o=ap+i*aSize;
+          if(tag==='application'&&strs[axU32(x,o+4)]==='label'){
+            const raw=axU32(x,o+8),dt=x[o+15],dat=axU32(x,o+16); // Res_value: size(2)res0(1)dataType(1)@o+11, data@o+16
+            if(raw!==0xffffffff)return{type:'str',value:strs[raw]};
+            if(dt===3)return{type:'str',value:strs[dat]};
+            if(dt===1)return{type:'ref',value:dat}; // @string/xxx → 查 resources.arsc
+            return null;
+          }
+        }
+      }
+      p+=csize;
+    }
+  }catch(e){}
+  return null;
+}
+/* ---- resources.arsc：按资源 ID 解析默认配置下的字符串（应用名通常在默认区） ---- */
+function arscDefaultString(arsc,resid){
+  try{
+    const gstr=axmlPool(arsc,12); // 全局字符串池紧跟 RES_TABLE 头(12字节)
+    const wantPkg=(resid>>>24)&0xff,wantType=(resid>>>16)&0xff,wantEntry=resid&0xffff;
+    let p=12;
+    p+=axU32(arsc,p+4); // 跳过全局字符串池块
+    while(p+8<=arsc.length){
+      const type=axU16(arsc,p),csize=axU32(arsc,p+4);
+      if(!csize)break;
+      if(type===0x0200){ // RES_PACKAGE_TYPE：包头 id 字段 = 资源 ID 高字节（android=0x01, 应用=0x7F）
+        const pkgId=axU32(arsc,p+8),hsize=axU16(arsc,p+2);
+        if(pkgId!==wantPkg){p+=csize;continue;}
+        let q=p+hsize;
+        while(q+8<p+csize){
+          const t2=axU16(arsc,q),h2=axU16(arsc,q+2),s2=axU32(arsc,q+4);
+          if(!s2)break;
+          if(t2===0x0201){ // RES_TABLE_TYPE
+            const tid=arsc[q+8],eCnt=axU32(arsc,q+12),eStart=axU32(arsc,q+16);
+            if(tid===wantType&&wantEntry<eCnt){
+              const eOff=q+eStart+axU32(arsc,q+h2+wantEntry*4);
+              const esz=axU16(arsc,eOff),efl=axU16(arsc,eOff+2);
+              if(esz>0&&!(efl&1)){ // 非 COMPLEX
+                const dt=arsc[eOff+8+3],dat=axU32(arsc,eOff+8+4);
+                if(dt===3)return gstr[dat]||'';
+              }
+            }
+          }
+          q+=s2;
+        }
+      }
+      p+=csize;
+    }
+  }catch(e){}
+  return '';
+}
+/* ---- APK 字节 → {pkg,label}（label = 应用在系统里显示的名字） ---- */
+async function apkMetaFromBytes(buf){
+  const xml=await zipEntry(buf,'AndroidManifest.xml');
+  const pkg=xml?parseAxmlPkg(xml):'';
+  let label='';
+  if(xml){
+    const r=parseAxmlLabel(xml);
+    if(r){
+      if(r.type==='str')label=r.value;
+      else if(r.type==='ref'){
+        const arsc=await zipEntry(buf,'resources.arsc');
+        if(arsc)label=arscDefaultString(arsc,r.value);
       }
     }
-    if(!xml)return '';
-    const pkg=parseAxmlPkg(xml);
-    if(pkg&&!a.pkg){a.pkg=pkg;api('set_pkg',{name:a.file},pkg);} // 缓存到路由器
-    return pkg;
+  }
+  return {pkg,label};
+}
+async function apkPkg(a){
+  try{
+    const r=await fetch('apks/'+encodeURIComponent(a.file));
+    const buf=new Uint8Array(await r.arrayBuffer());
+    const m=await apkMetaFromBytes(buf);
+    if(m.pkg&&!a.pkg){a.pkg=m.pkg;api('set_pkg',{name:a.file},m.pkg);} // 缓存到路由器
+    if(m.label&&!a.label){a.label=m.label;api('set_label',{name:a.file},m.label);} // 顺手补中文名
+    return m.pkg;
   }catch(e){return '';}
 }
 async function newPlan(){
@@ -710,6 +812,7 @@ async function loadApks(){
         <button class="mini" onclick="cpLine(${i})">复制 install 行</button>
         <a class="mini" style="text-decoration:none;display:inline-block" href="apks/${encodeURIComponent(a.file)}" download>下载</a>
         <button class="mini" onclick="renameApk(${i})">改名</button>
+        ${a.pkg&&a.file!==a.pkg+'.apk'?`<button class="mini" onclick="toPkgName(${i})">改为包名</button>`:''}
         <button class="mini red" onclick="deleteApk(${i})">删除</button>
       </td></tr>`);
   });
@@ -736,15 +839,33 @@ async function cpLine(i){
   navigator.clipboard.writeText(line).then(()=>msg(p?('已复制（含包名 '+p+'）'):'已复制，请把「包名待填」改成真实包名'));
 }
 function saneName(n){return n.replace(/[^A-Za-z0-9._-]/g,'_');}
+/* 上传前直接从文件本体解析包名（ZIP 里 AndroidManifest.xml 在头部，读前 512KB 足够） */
+/* 文件名里有没有中文（兜底用：APK 里读不到应用名时拿原始文件名当中文名） */
+function hasCJK(s){return /[\u4e00-\u9fff\u3400-\u4dbf]/.test(s);}
 async function uploadApks(files){
   for(const f of files){
     if(!/\.apk$/i.test(f.name)){msg(f.name+' 不是 .apk，跳过',true);continue;}
-    let name=saneName(f.name);
-    if(!/\.apk$/.test(name))name=name+'.apk';
+    msg('正在解析 '+f.name+' …');
+    // 1. 上传前从 APK 本体解析：包名 + 应用名（label → resources.arsc 解出中文）
+    let pkg='',label='';
+    try{
+      const m=await apkMetaFromBytes(new Uint8Array(await f.arrayBuffer()));
+      pkg=m.pkg;label=m.label;
+    }catch(e){}
+    const origName=f.name.replace(/\.apk$/i,'');
+    if(!label&&hasCJK(origName))label=origName; // 兜底：原始文件名带中文就用它
+    // 2. 文件直接存成 包名.apk（中文名不再被清洗成 TV__.apk）
+    let name=(pkg||saneName(origName))+'.apk';
+    let n=2;
+    while(APKLIST.some(a=>a.file===name)){name=(pkg||saneName(origName))+'-'+(n++)+'.apk';}
     const r=await fetch(API+'?op=upload&name='+encodeURIComponent(name),
       {method:'POST',headers:{'X-Auth-Token':TOKEN},body:f});
     const j=await r.json().catch(()=>({ok:0,err:'HTTP '+r.status}));
-    msg(j.ok?('已上传 '+name):('上传失败 '+name+'：'+(j.err||'')),!j.ok);
+    if(!j.ok){msg('上传失败 '+name+'：'+(j.err||''),true);continue;}
+    // 3. 包名 / 中文名立即缓存到服务器（中文名之后随时可改）
+    if(pkg)await api('set_pkg',{name:name},pkg);
+    if(label)await api('set_label',{name:name},label);
+    msg(pkg?('已上传 '+name+'（'+(label||pkg)+'）'):('已上传 '+name+'（未能识别包名，请点「识别包名」）'));
   }
   loadApks();
 }
@@ -756,6 +877,18 @@ async function renameApk(i){
   if(!/\.apk$/.test(nt)){msg('必须以 .apk 结尾',true);return;}
   const r=await api('rename_apk',{from:old,to:nt});
   if(r.ok){msg('已改名');loadApks();}else msg(r.err||'失败',true);
+}
+async function toPkgName(i){
+  const a=APKLIST[i];
+  if(!a.pkg){msg('该文件还没识别出包名，请先点「识别包名」',true);return;}
+  let to=a.pkg+'.apk';
+  if(APKLIST.some(x=>x.file===to&&x.file!==a.file)){
+    let n=2;while(APKLIST.some(x=>x.file===a.pkg+'-'+n+'.apk'))n++;
+    to=a.pkg+'-'+n+'.apk';
+    if(!confirm('已存在 '+a.pkg+'.apk，将改名为 '+to+'，继续？'))return;
+  }
+  const r=await api('rename_apk',{from:a.file,to:to});
+  if(r.ok){msg('已改为包名：'+to);loadApks();syncRmpkgs();}else msg(r.err||'失败',true);
 }
 async function deleteApk(i){
   const f=APKLIST[i].file;
