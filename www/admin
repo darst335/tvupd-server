@@ -422,8 +422,36 @@ georaw)
     ;;
 
 logtail)
-    printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
-    tail -n 60 "$PRIV/access.log" 2>/dev/null
+    # 返回 JSON 行数组，前端按机器分组折叠展示
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n'
+    printf '{"ok":1,"lines":['
+    tail -n 400 "$PRIV/access.log" 2>/dev/null | awk '{
+        gsub(/\\/,"\\\\"); gsub(/"/,"\\\"");
+        printf "%s\"%s\"",(NR>1?",":""),$0
+    }'
+    printf ']}'
+    ;;
+
+log_clear)
+    # 清除访问日志：sn=只清某台（id 或 mac 匹配），before=清某时刻之前的，all=1 清空
+    # 两者可叠加；每次清除前自动备份 access.log.bak
+    LSN=$(qget sn)
+    LBF=$(printf '%s' "$QS" | sed -n 's/.*before=\([0-9: -]\{1,20\}\).*/\1/p' | tr -cd '0-9: -')
+    LALL=$(qget all)
+    cp "$PRIV/access.log" "$PRIV/access.log.bak" 2>/dev/null
+    TMP="$PRIV/access.log.tmp"
+    if [ "$LALL" = "1" ]; then
+        : > "$TMP"
+    else
+        awk -F'|' -v sn="$LSN" -v bf="$LBF" 'BEGIN{u=toupper(sn)}{
+            del=0
+            if(sn!="" && (toupper($2)==u || toupper($3)==u)) del=1
+            if(bf!="" && $1<bf) del=1
+            if(!del) print
+        }' "$PRIV/access.log" 2>/dev/null > "$TMP"
+    fi
+    mv "$TMP" "$PRIV/access.log" 2>/dev/null
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1}'
     ;;
 
 get_settings)
