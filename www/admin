@@ -508,6 +508,24 @@ save_settings)
     printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1}'
     ;;
 
+get_ku9allow)
+    printf 'Content-Type: text/plain; charset=utf-8\r\n\r\n'
+    cat "$PRIV/ku9-allow.txt" 2>/dev/null
+    ;;
+
+save_ku9allow)
+    # POST body = 名单全文（一行一个序列号，# 注释）；只保留合法字符行，自动备份
+    cp "$PRIV/ku9-allow.txt" "$PRIV/ku9-allow.txt.bak" 2>/dev/null
+    printf '%s\n' "$BODY" | tr -d '\r' | awk '{
+        gsub(/^[ \t]+|[ \t]+$/,"")
+        if($0!="" && $0 ~ /^[A-Za-z0-9._#-]+$/) print
+    }' > "$PRIV/ku9-allow.txt.tmp"
+    mv "$PRIV/ku9-allow.txt.tmp" "$PRIV/ku9-allow.txt"
+    KN=$(grep -cv '^#' "$PRIV/ku9-allow.txt" 2>/dev/null)
+    echo "$(date '+%F %T')|admin|save_ku9allow|n=$KN" >> "$PRIV/audit.log"
+    printf 'Content-Type: application/json; charset=utf-8\r\n\r\n{"ok":1,"n":"%s"}' "$KN"
+    ;;
+
 set_pwd)
     # 修改管理密码：POST body = 新密码（字母数字，≥6 位）
     P=$(printf '%s' "$BODY" | tr -cd 'a-zA-Z0-9')
