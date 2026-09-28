@@ -24,6 +24,45 @@ It ships with a built-in web admin console plus a LuCI menu entry. The box-side 
 | Customer distribution | Geo lookup of egress IPs + ISP (ip-api.com, results cached locally); customers are listed first. |
 | System settings | External service address / admin whitelist subnet / online-detection window / **APK storage location (moving it auto-migrates data + creates a symlink)** / admin password. Defaults are auto-derived from the router's current configuration. |
 
+| No-flash agent | `agent/`: the TV Butler APK. A user-level install is enough to join the fleet (app installs need one confirmation press without root); the protocol is fully compatible with the firmware side. |
+
+## Screenshots (sanitized demo data)
+
+Serial numbers are fictional DEMO-prefixed values, IPs use 192.168.1.x, and the domain is your.domain.
+
+| Overview | Software plan |
+|---|---|
+| ![Overview](docs/img/console-overview.png) | ![Software plan](docs/img/console-plan.png) |
+| **APK library** | **Delivery records** |
+| ![APK library](docs/img/console-apks.png) | ![Delivery records](docs/img/console-records.png) |
+| **Device registry** | **System settings (incl. Ku9 authorization list)** |
+| ![Device registry](docs/img/console-devices.png) | ![System settings](docs/img/console-settings.png) |
+
+Real-world result: plan delivered → Ku9 installed automatically + authorized per serial → preset subscription auto-loaded, playing right after boot (customer's live channel below):
+
+![Ku9 playing right after automatic deployment](docs/img/ku9-playing.png)
+
+## Tested On
+
+**Main router / server**
+
+| Item | Configuration |
+|---|---|
+| Router | China Mobile CMCC RAX3000M (MT7981, 256MB RAM) |
+| System | ImmortalWrt (OpenWrt) + lighttpd/CGI |
+| External service | DDNS domain :8083; only the manifest and APK downloads are exposed, the admin console is reachable from the whitelisted LAN subnet only |
+| Storage | On-router /srv (the APK library can be moved to a data disk with an automatic symlink) |
+| Network | Home broadband; customer boxes pull plans via the DDNS domain |
+
+**Boxes (two real devices tested)**
+
+| Model | Onboarding | What was tested |
+|---|---|---|
+| UNT401H (China Mobile IPTV customized box, Android 4.4) | Firmware implant (tv-updater written into /system) | Ku9 auto-install + per-serial authorization + preset subscription auto-load, playing right after boot with zero manual steps; remote commands / APK distribution all working |
+| M301H (China Mobile streaming box, Android 4.4) | Firmware implant (same) | Heartbeat reporting / plan delivery / remote commands / APK distribution under long-term operation |
+
+Both are Android 4.4 (SDK 19), proving the whole chain works on old firmware: manifest polling, silent installs, script delivery (busybox wget + DNS compatibility layer), and Ku9's `/sdcard/酷9/configuration/` preset subscription mechanism.
+
 ## Directory Layout
 
 ```

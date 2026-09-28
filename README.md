@@ -17,6 +17,44 @@
 | APK 库 | 上传 APK 自动识别包名（浏览器端解析 AndroidManifest），支持中文名 |
 | 客户分布 | 出口 IP 归属地 + 运营商（ip-api.com 中文接口，本地缓存），客户优先排列 |
 | 系统设置 | 对外服务地址 / 管理白名单网段 / 在线判定窗口 / **APK 存放位置（改动自动迁移+软链）** / 管理密码，默认值自动取路由器当前配置 |
+| 免刷机 agent | `agent/`：TV管家 APK，用户级安装即可接入（无 root 时安装应用需按一次确认），协议与固件端完全一致 |
+
+## 界面截图（脱敏演示数据）
+
+序列号均为 DEMO 前缀的虚构值，IP 用 192.168.1.x，域名为 your.domain。
+
+| 总览 | 软件方案 |
+|---|---|
+| ![总览](docs/img/console-overview.png) | ![软件方案](docs/img/console-plan.png) |
+| **APK 库** | **收发记录** |
+| ![APK库](docs/img/console-apks.png) | ![收发记录](docs/img/console-records.png) |
+| **设备档案** | **系统设置（含酷9授权名单）** |
+| ![设备档案](docs/img/console-devices.png) | ![系统设置](docs/img/console-settings.png) |
+
+实机效果：方案下发 → 酷9 自动安装 + 按序列号授权 → 预置订阅自动加载，开机即播（下图为客户实拍频道画面）：
+
+![酷9自动部署后开机直接播放](docs/img/ku9-playing.png)
+
+## 实测环境
+
+**主路由 / 服务器**
+
+| 项目 | 配置 |
+|---|---|
+| 路由器 | 中移 CMCC RAX3000M（MT7981，256MB 内存） |
+| 系统 | ImmortalWrt（OpenWrt）+ lighttpd/CGI |
+| 对外服务 | DDNS 域名 :8083，仅暴露 manifest 与 APK 下载；管理台仅内网白名单可开 |
+| 存储 | 路由器本体 /srv（APK 库可迁数据盘，自动软链） |
+| 网络 | 家用宽带，客户盒子经 DDNS 域名回连拉方案 |
+
+**盒子端（两款真机实测）**
+
+| 机型 | 接入方式 | 实测内容 |
+|---|---|---|
+| UNT401H（中国移动 IPTV 定制机，Android 4.4） | 固件植入（tv-updater 写入 /system） | 酷9 自动装机 + 序列号授权 + 预置订阅自动加载，开机即播，全程零人工；远程指令/APK 分发正常 |
+| M301H（中国移动魔百和，Android 4.4） | 固件植入（同上） | 心跳上报 / 方案下发 / 远程指令 / APK 分发长期运行 |
+
+两款均为 Android 4.4（SDK 19），验证了全链路兼容老固件：清单轮询、静默安装、脚本下发（busybox wget + DNS 兼容层）、以及酷9 的 `/sdcard/酷9/configuration/` 预置订阅机制。
 
 ## 目录结构
 
