@@ -120,7 +120,7 @@ pre.log{background:#161b22;color:#c9d1d9;font:12px/1.5 Consolas,monospace;paddin
       <span class="muted">方案下拉选择 · 未登记身份的盒子自动走 default · 保存后 10 分钟内全网生效</span>
     </div>
     <table class="rowtbl" id="t-dv"><thead><tr>
-      <th style="width:34%">身份（序列号或去冒号MAC）</th><th style="width:18%">方案</th><th style="width:36%">备注（客户/位置）</th><th style="width:6%"></th>
+      <th style="width:32%">身份（序列号或去冒号MAC）</th><th style="width:16%">方案</th><th style="width:34%">备注（客户/位置）</th><th style="width:8%">酷9授权</th><th style="width:6%"></th>
     </tr></thead><tbody></tbody></table>
     <datalist id="dv-ids"></datalist>
     <p class="muted" style="margin:10px 0">身份输入框点击/输入可下拉选择「未登记设备」里来过的盒子，不用手打；
@@ -270,11 +270,18 @@ pre.log{background:#161b22;color:#c9d1d9;font:12px/1.5 Consolas,monospace;paddin
     <div style="margin-top:10px"><button class="pri" onclick="setPwd()">修改密码</button></div>
   </div>
   <div class="card"><h2>酷9 授权名单（按序列号放行，删行 = 吊销）</h2>
-    <p class="muted" style="margin:0 0 10px">只有名单里的盒子序列号才能从服务器领取酷9配置和频道列表（每次领取都有日志，泄露可定位到盒）。
-      一行一个序列号，# 开头是注释。盒子序列号在「总览 / 档案表」里看，或 SSH 看 /srv/tvupd-priv/ku9-access.log。</p>
-    <textarea id="st-ku9allow" rows="6" style="width:100%;font-family:monospace;font-size:12px" spellcheck="false" placeholder="# 一行一个序列号"></textarea>
+    <p class="muted" style="margin:0 0 8px">只有名单里的盒子序列号才能从服务器领取酷9配置和频道列表（每次领取都有日志，泄露可定位到盒）。
+      一行一个序列号，# 开头是注释。下面预览会自动带上档案表里的备注名，设备多也好找。</p>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
+      <select id="ku9-add-sel" style="max-width:360px"></select>
+      <button class="mini" onclick="ku9AddDevice()">＋ 授权选中设备</button>
+      <span class="geo" id="ku9-devinfo"></span>
+    </div>
+    <textarea id="st-ku9allow" rows="6" style="width:100%;font-family:monospace;font-size:12px" spellcheck="false"
+      placeholder="# 一行一个序列号" oninput="ku9RenderPreview()"></textarea>
     <div style="margin-top:8px"><button class="pri" onclick="saveKu9Allow()">保存授权名单</button>
       <span class="geo" style="margin-left:8px" id="ku9allow-info"></span></div>
+    <div id="ku9-preview" style="margin-top:10px;line-height:1.9;font-size:12px"></div>
   </div>
   <div class="card"><h2>迁移 / 备份</h2>
     <p class="muted" style="margin:0">整套系统（服务端脚本 + 数据 + LuCI 菜单）已开源打包：<span class="mono">tvupd-server</span>（GitHub）。
@@ -566,31 +573,37 @@ function renderDevRows(){
       <td><input value="${esc(r.id)}" list="dv-ids" oninput="DEVROWS[${i}].id=this.value" placeholder="序列号或MAC（可下拉选未登记设备）" spellcheck="false"></td>
       <td><select onchange="DEVROWS[${i}].plan=this.value">${planOptions(r.plan)}</select></td>
       <td><input value="${esc(r.note)}" oninput="DEVROWS[${i}].note=this.value" placeholder="如：张三-台江-138xx"></td>
+      <td style="text-align:center"><input type="checkbox" title="勾选 = 加入酷9授权名单（保存时同步）" ${r.ku9!==false?'checked':''} onchange="DEVROWS[${i}].ku9=this.checked"></td>
       <td><button class="mini red" onclick="delDevRow(${i})">删</button></td></tr>`);
   });
-  if(!DEVROWS.length)tb.innerHTML='<tr><td colspan="4" class="muted">还没有盒子，点上面「＋ 添加盒子」</td></tr>';
+  if(!DEVROWS.length)tb.innerHTML='<tr><td colspan="5" class="muted">还没有盒子，点上面「＋ 添加盒子」</td></tr>';
 }
-function addDevRow(){DEVROWS.push({id:'',plan:'default',note:''});renderDevRows();}
+function addDevRow(){DEVROWS.push({id:'',plan:'default',note:'',ku9:true});renderDevRows();}
 function delDevRow(i){DEVROWS.splice(i,1);renderDevRows();}
 function dvRawToggle(){
   const raw=document.getElementById('dv-rawmode').checked;
   const ta=document.getElementById('dv-editor'),tb=document.querySelector('#t-dv');
   ta.classList.toggle('hidden',!raw);tb.classList.toggle('hidden',raw);
   if(raw)ta.value=DEVROWS.filter(r=>r.id).map(r=>[r.id,r.plan,r.note].join('|')).join('\n');
-  else{ // 从文本解析回来
+  else{ // 从文本解析回来（酷9授权列不在文本里，按当前名单回填）
     DEVROWS=[];
     ta.value.split('\n').forEach(l=>{l=l.trim();if(!l||l.startsWith('#'))return;
-      const p=l.split('|');if(p[0])DEVROWS.push({id:p[0],plan:p[1]||'default',note:p[2]||''});});
+      const p=l.split('|');if(p[0])DEVROWS.push({id:p[0],plan:p[1]||'default',note:p[2]||'',
+        ku9:KU9ALLOW.some(x=>x.trim().toUpperCase()===(p[0]||'').toUpperCase())});});
     renderDevRows();
   }
 }
 async function loadDevices(){
   const d=await api('get_devices');
+  // 顺带加载酷9授权名单，用于勾选列回显
+  const ka=await api('get_ku9allow');
+  KU9ALLOW=(ka.text||'').split('\n').filter(l=>l.trim());
+  const inAllow=s=>KU9ALLOW.some(x=>x.trim().toUpperCase()===s.toUpperCase());
   DEVROWS=[];
   ((d.text||'').split('\n')).forEach(l=>{l=l.trim();
     if(!l||l.startsWith('#'))return;
     const p=l.split('|');
-    if(/^[A-Za-z0-9_-]+$/.test(p[0]||''))DEVROWS.push({id:p[0],plan:p[1]||'default',note:p[2]||''});
+    if(/^[A-Za-z0-9_-]+$/.test(p[0]||''))DEVROWS.push({id:p[0],plan:p[1]||'default',note:p[2]||'',ku9:inAllow(p[0])});
   });
   document.getElementById('dv-rawmode').checked=false;
   document.getElementById('dv-editor').classList.add('hidden');
@@ -607,7 +620,21 @@ async function saveDevices(){
   const txt=DEVROWS.filter(r=>r.id&&r.plan).map(r=>[r.id,r.plan,r.note].join('|')).join('\n');
   const b=document.querySelector('#v-dv button.pri');b.disabled=true;
   const r=await api('save_devices',{},txt);
-  b.disabled=false;msg(r.ok?'档案表已保存，10 分钟内生效':'保存失败：'+(r.err||''),!r.ok);
+  b.disabled=false;
+  if(!r.ok){msg('保存失败：'+(r.err||''),true);return;}
+  // 同步酷9授权名单：勾选的加入，取消勾选的移除；名单里不属于任何档案行的序列号保留
+  const lines=KU9ALLOW.filter(l=>{
+    const s=l.trim();if(!s||s.startsWith('#'))return true;
+    const row=DEVROWS.find(x=>x.id&&x.id.toUpperCase()===s.toUpperCase());
+    return !(row&&row.ku9===false);
+  });
+  let added=0;
+  DEVROWS.forEach(x=>{
+    if(x.id&&x.ku9&&!lines.some(l=>l.trim().toUpperCase()===x.id.toUpperCase())){lines.push(x.id);added++;}
+  });
+  KU9ALLOW=lines;
+  const ka=await api('save_ku9allow',{},lines.join('\n'));
+  msg('档案表已保存，10 分钟内生效'+(ka.ok?`（酷9授权已同步：${added?'新增 '+added+' 台':'无变化'}）`:'（酷9授权同步失败）'),!ka.ok);
 }
 
 /* ---- 软件方案（结构化） ---- */
@@ -1206,10 +1233,12 @@ async function loadSettings(){
   }
   const ka=await api('get_ku9allow');
   if(ka.text!==undefined){
-    document.getElementById('st-ku9allow').value=ka.text;
-    const n=ka.text.split('\n').filter(l=>l.trim()&&!l.trim().startsWith('#')).length;
+    KU9ALLOW=(ka.text||'').split('\n').filter(l=>l.trim());
+    document.getElementById('st-ku9allow').value=KU9ALLOW.join('\n');
+    const n=KU9ALLOW.filter(l=>!l.trim().startsWith('#')).length;
     document.getElementById('ku9allow-info').textContent='当前 '+n+' 个已授权序列号';
   }
+  await ku9LoadDevices();ku9RenderPreview();
   const tb=document.querySelector('#t-sys tbody');tb.innerHTML='';
   if(b.ok){
     const rows=[
@@ -1240,7 +1269,44 @@ async function saveKu9Allow(){
   const n=v.split('\n').filter(l=>l.trim()&&!l.trim().startsWith('#')).length;
   if(!confirm('保存授权名单（'+n+' 个序列号）？名单外的盒子将无法领取酷9配置。'))return;
   const r=await api('save_ku9allow',{},v);
-  if(r.ok){msg('授权名单已保存（'+n+' 个序列号）');loadSettings();}else msg(r.err||'保存失败',true);
+  if(r.ok){KU9ALLOW=v.split('\n').filter(l=>l.trim());msg('授权名单已保存（'+n+' 个序列号）');loadSettings();}else msg(r.err||'保存失败',true);
+}
+/* ---- 酷9授权：设备备注映射 + 下拉快加 + 预览 ---- */
+let KU9ALLOW=[],DEVNOTE={};
+async function ku9LoadDevices(){
+  const d=await api('get_devices');
+  DEVNOTE={};
+  ((d.text||'').split('\n')).forEach(l=>{l=l.trim();
+    if(!l||l.startsWith('#'))return;
+    const p=l.split('|');
+    if(/^[A-Za-z0-9_-]+$/.test(p[0]||''))DEVNOTE[p[0].toUpperCase()]={note:p[2]||'',plan:p[1]||''};
+  });
+}
+function ku9RenderPreview(){
+  const lines=document.getElementById('st-ku9allow').value.split('\n').map(x=>x.trim()).filter(Boolean);
+  const items=[];
+  lines.forEach(l=>{
+    if(l.startsWith('#')){items.push(`<span class="geo">${esc(l)}</span>`);return;}
+    const d=DEVNOTE[l.toUpperCase()];
+    items.push(`<span class="mono small">${esc(l)}</span><span class="geo"> — ${
+      d?(esc(d.note||'（无备注）')+' · 方案 '+esc(d.plan)):'<b>未登记</b>'}</span>`);
+  });
+  document.getElementById('ku9-preview').innerHTML=items.join('<br>')||'<span class="geo">（空名单）</span>';
+  const inList=new Set(lines.map(x=>x.toUpperCase()));
+  const sel=['<option value="">（选择要授权的已登记设备）</option>'];
+  Object.keys(DEVNOTE).sort().forEach(k=>{
+    if(!inList.has(k))sel.push(`<option value="${esc(k)}">${esc(DEVNOTE[k].note||'（无备注）')} · ${esc(k)}</option>`);
+  });
+  document.getElementById('ku9-add-sel').innerHTML=sel.join('');
+  document.getElementById('ku9-devinfo').textContent='档案表共 '+Object.keys(DEVNOTE).length+' 台设备';
+}
+function ku9AddDevice(){
+  const v=document.getElementById('ku9-add-sel').value;
+  if(!v){msg('先在下拉里选一台设备',true);return;}
+  const ta=document.getElementById('st-ku9allow');
+  ta.value=(ta.value.replace(/\s*$/,'')+'\n'+v).replace(/^\n+/,'')+'\n';
+  ku9RenderPreview();
+  msg('已加入编辑框，点「保存授权名单」生效');
 }
 async function setPwd(){
   const p1=document.getElementById('st-pwd1').value.trim();
