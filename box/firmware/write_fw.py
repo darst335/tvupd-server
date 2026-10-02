@@ -1,10 +1,22 @@
 # -*- coding: utf-8 -*-
 """把 tv-* 远程控制系统写入固件目录 update/system/，并登记 filesystem_config.txt。
-可重复执行（幂等）。"""
-import os, shutil, sys
+可重复执行（幂等）。
 
-FW = r"E:/电视盒固件/HIKSI TOOL/update"
-KIT = r"I:/5566game/2026-09-28-18-10-03/tvkit"
+用法（不写死任何机器的路径，全部走命令行参数）:
+    python write_fw.py --fw <固件解包目录/update> --kit <tvkit 目录>
+
+  --fw  指到固件解包出来的 update/ 目录（下面要有 META/filesystem_config.txt）
+  --kit 指到待写入的 tvkit 目录（下面要有 tv-updater / tv-maint / … / tv-adbkey）
+"""
+import argparse, os, shutil
+
+ap = argparse.ArgumentParser(description="把 tv-* 组件写入固件树并登记 filesystem_config.txt")
+ap.add_argument("--fw", required=True, help="固件解包目录（update/，内含 META/filesystem_config.txt）")
+ap.add_argument("--kit", required=True, help="待写入组件所在目录（tvkit）")
+a = ap.parse_args()
+
+FW = a.fw
+KIT = a.kit
 
 FILES = [
     ("tv-updater",            "system/bin/tv-updater",              "0 2000 755"),

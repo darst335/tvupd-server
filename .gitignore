@@ -1,0 +1,58 @@
+# ============================================================
+#  ★ 脱敏红线：下面这些东西一旦提交，仓库就得作废重写 —— 先挡住
+# ============================================================
+
+# ---- 服务端私有数据（真机名单 / 口令 / 日志；仓库里只保留 priv-skel/ 下的示例）----
+/devices.txt
+/users.txt
+/users.txt.*
+/admin.pwd
+/locations.txt
+/access.log
+/cmds.log
+/audit.log
+/session.secret
+/settings.env
+/ku9-list.txt
+/ku9-allow.txt
+/ku9-conf.json
+/geo-lookup.sh.out
+
+# ---- 密钥 / 证书 / 签名材料 ----
+*.jks
+*.keystore
+*.pem
+*.key
+*.pk8
+*.pfx
+*.p12
+*.adbkey
+*.adbkey.pub
+
+# ---- 固件 / APK / 大文件（发布时只留截图，其余一律不入库）----
+*.apk
+*.img
+*.bin
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.cpio
+*.ko
+
+# ---- 构建产物 ----
+agent/build/
+agent/out/
+__pycache__/
+*.pyc
+
+# ---- 备份 / 临时 ----
+*.bak
+*.bak-*
+*.tmp
+*.log
+
+# ---- 本机 / 编辑器 ----
+.DS_Store
+Thumbs.db
+desktop.ini

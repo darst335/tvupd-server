@@ -1,15 +1,32 @@
 # -*- coding: utf-8 -*-
 """在原 cpio 基础上替换 init.rc，重建 ramdisk 并组装 boot.img。
-保留原 cpio 的条目顺序 / mode / uid / gid / mtime（海思镜像对结构敏感，只改内容不改元数据）。"""
-import os, zlib, struct, shutil
+保留原 cpio 的条目顺序 / mode / uid / gid / mtime（海思镜像对结构敏感，只改内容不改元数据）。
 
-BOOT = r"E:/电视盒固件/HIKSI TOOL/update/boot.img"
-CPIO = r"I:/5566game/2026-09-28-18-10-03/ramdisk.cpio"
-NEWINITRC = r"I:/5566game/2026-09-28-18-10-03/ramdisk/init.rc"
-OUT = r"I:/5566game/2026-09-28-18-10-03/boot_new.img"
+用法（不写死任何机器的路径，全部走命令行参数）:
+    python pack_boot.py --boot <原boot.img> --cpio <原ramdisk.cpio> \
+        --initrc <新init.rc> --out <boot_new.img> \
+        [--page 16384] [--kernel-size 8617844] [--ramdisk-orig 414514]
 
-PAGE = 16384
-KERNEL_SIZE = 8617844
+  --kernel-size / --page 是机型相关的偏移参数（默认值取自 UNT401H / Hi3798MV310 的 4.4 固件），
+  换机型务必按自己的 boot 头重算。
+"""
+import argparse, zlib, struct
+
+ap = argparse.ArgumentParser(description="替换 init.rc 并重建 boot.img")
+ap.add_argument("--boot", required=True, help="原始 boot.img")
+ap.add_argument("--cpio", required=True, help="原始 ramdisk 的 cpio（未 gzip）")
+ap.add_argument("--initrc", required=True, help="替换用的 init.rc")
+ap.add_argument("--out", required=True, help="输出 boot_new.img")
+ap.add_argument("--page", type=int, default=16384, help="boot 页大小（默认 16384）")
+ap.add_argument("--kernel-size", type=int, default=8617844,
+                help="内核段大小（默认 UNT401H 4.4 固件的 8617844）")
+ap.add_argument("--ramdisk-orig", type=int, default=414514,
+                help="原 ramdisk 的 gzip 大小（仅用于打印对比，不影响产出）")
+a = ap.parse_args()
+
+BOOT, CPIO, NEWINITRC, OUT = a.boot, a.cpio, a.initrc, a.out
+PAGE = a.page
+KERNEL_SIZE = a.kernel_size
 RAMDISK_OFF = PAGE + ((KERNEL_SIZE + PAGE - 1) // PAGE) * PAGE
 
 data = open(BOOT, 'rb').read()
@@ -76,7 +93,7 @@ print("new cpio", len(newcpio))
 # ---------- 4) gzip ----------
 co = zlib.compressobj(9, zlib.DEFLATED, 31)   # 31 = gzip
 gz = co.compress(newcpio) + co.flush()
-print("gzip ramdisk", len(gz), "(orig", len(data[RAMDISK_OFF:RAMDISK_OFF + 414514]), ")")
+print("gzip ramdisk", len(gz), "(orig", a.ramdisk_orig, ")")
 
 # ---------- 5) 组装 boot.img ----------
 hdr = bytearray(data[:PAGE])
